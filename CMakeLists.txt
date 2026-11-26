@@ -1,16 +1,24 @@
 cmake_minimum_required(VERSION 3.22)
 
-# Universal (arm64 + x86_64). Natively on Apple silicon, Logic Pro hosts Audio Units out of process without ARA
-# (the capture mode works there); under Rosetta it can use ARA and loads the x86_64 slice.
-set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "")
-set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "")
+if(CMAKE_HOST_APPLE)
+    # Universal (arm64 + x86_64). Natively on Apple silicon, Logic Pro hosts Audio Units out of process without ARA
+    # (the capture mode works there); under Rosetta it can use ARA and loads the x86_64 slice.
+    set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "")
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "")
+endif()
 
 project(ShizukuTune VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-option(SHIZUKU_BUILD_PLUGIN "Build the JUCE ARA Audio Unit" ON)
+option(SHIZUKU_BUILD_PLUGIN "Build the JUCE ARA plug-in (Audio Unit and VST3 on macOS, VST3 on Windows)" ON)
+
+if(MSVC)
+    # Sources are UTF-8 (Japanese UI strings); M_PI from <cmath>.
+    add_compile_options(/utf-8)
+    add_compile_definitions(_USE_MATH_DEFINES)
+endif()
 
 # ---------------------------------------------------------------------------
 # Analysis library (no JUCE dependency, shared by the plugin and command-line tools)
@@ -33,10 +41,13 @@ add_library(shizuku_correction STATIC src/correction/PitchCorrection.cpp src/cor
 target_include_directories(shizuku_correction
     PUBLIC src/correction
     PRIVATE external/signalsmith-stretch external/signalsmith-linear/include)
-target_compile_definitions(shizuku_correction PRIVATE SIGNALSMITH_USE_ACCELERATE)
-target_link_libraries(shizuku_correction PUBLIC shizuku_analysis "-framework Accelerate")
+target_link_libraries(shizuku_correction PUBLIC shizuku_analysis)
+if(APPLE)
+    target_compile_definitions(shizuku_correction PRIVATE SIGNALSMITH_USE_ACCELERATE)
+    target_link_libraries(shizuku_correction PUBLIC "-framework Accelerate")
+endif()
 set_target_properties(shizuku_correction PROPERTIES POSITION_INDEPENDENT_CODE ON)
-if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+if(NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT MSVC)
     # Stretch is ~10x slower unoptimised; keep it fast in Debug builds as well.
     target_compile_options(shizuku_correction PRIVATE -O2)
 endif()
@@ -79,8 +90,14 @@ target_link_libraries(note-edits-test PRIVATE shizuku_synthetic shizuku_correcti
 add_test(NAME note-edits COMMAND note-edits-test)
 
 # ---------------------------------------------------------------------------
-# ARA Audio Unit
+# ARA plug-in: Audio Unit and VST3 on macOS, VST3 on Windows (VST3 SDK bundled with JUCE)
 if(SHIZUKU_BUILD_PLUGIN)
+    if(APPLE)
+        set(shizuku_plugin_formats AU VST3)
+    else()
+        set(shizuku_plugin_formats VST3)
+    endif()
+
     add_subdirectory(external/JUCE)
     juce_set_ara_sdk_path("${CMAKE_CURRENT_SOURCE_DIR}/external/ARA_SDK")
 
@@ -91,7 +108,7 @@ if(SHIZUKU_BUILD_PLUGIN)
         BUNDLE_ID "dev.kojira.shizukutune"
         PLUGIN_MANUFACTURER_CODE Kjra
         PLUGIN_CODE Shzt
-        FORMATS AU
+        FORMATS ${shizuku_plugin_formats}
         IS_SYNTH FALSE
         NEEDS_MIDI_INPUT FALSE
         NEEDS_MIDI_OUTPUT FALSE
@@ -135,25 +152,30 @@ if(SHIZUKU_BUILD_PLUGIN)
         external/JUCE/modules/juce_audio_plugin_client/juce_audio_plugin_client_ARA.cpp) # the ARA library (as in the AU)
     target_include_directories(capture-session-test PRIVATE $<TARGET_PROPERTY:ShizukuTune,INCLUDE_DIRECTORIES>)
     target_compile_definitions(capture-session-test PRIVATE $<TARGET_PROPERTY:ShizukuTune,COMPILE_DEFINITIONS>)
-    set_source_files_properties(tests/CaptureSessionTest.cpp PROPERTIES COMPILE_OPTIONS "-xobjective-c++")
+    if(APPLE)
+        set_source_files_properties(tests/CaptureSessionTest.cpp PROPERTIES COMPILE_OPTIONS "-xobjective-c++")
+    endif()
     target_link_libraries(capture-session-test PRIVATE ShizukuTune shizuku_synthetic shizuku_correction_setup)
     add_test(NAME capture-session COMMAND capture-session-test)
 
-    # Hosts the built AU through AudioToolbox with a side chain and checks capture -> corrected playback.
-    add_executable(shizuku-au-capture-check tools/AuCaptureCheckMain.mm)
-    target_link_libraries(shizuku-au-capture-check PRIVATE shizuku_analysis "-framework AudioToolbox" "-framework CoreFoundation")
-    add_dependencies(shizuku-au-capture-check ShizukuTune_AU)
+    # macOS-only tools.
+    if(APPLE)
+        # Hosts the built AU through AudioToolbox with a side chain and checks capture -> corrected playback.
+        add_executable(shizuku-au-capture-check tools/AuCaptureCheckMain.mm)
+        target_link_libraries(shizuku-au-capture-check PRIVATE shizuku_analysis "-framework AudioToolbox" "-framework CoreFoundation")
+        add_dependencies(shizuku-au-capture-check ShizukuTune_AU)
 
-    # Renders the plug-in's pitch-line view for two WAV files to a PNG (UI check without a DAW).
-    juce_add_console_app(shizuku-render-view PRODUCT_NAME "shizuku-render-view")
-    target_sources(shizuku-render-view PRIVATE tools/RenderViewMain.cpp src/plugin/PitchLineView.cpp)
-    target_include_directories(shizuku-render-view PRIVATE src/plugin)
-    target_compile_definitions(shizuku-render-view PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
-    target_link_libraries(shizuku-render-view
-        PRIVATE
-            shizuku_correction
-            juce::juce_gui_basics
-        PUBLIC
-            juce::juce_recommended_config_flags
-            juce::juce_recommended_warning_flags)
+        # Renders the plug-in's pitch-line view for two WAV files to a PNG (UI check without a DAW).
+        juce_add_console_app(shizuku-render-view PRODUCT_NAME "shizuku-render-view")
+        target_sources(shizuku-render-view PRIVATE tools/RenderViewMain.cpp src/plugin/PitchLineView.cpp)
+        target_include_directories(shizuku-render-view PRIVATE src/plugin)
+        target_compile_definitions(shizuku-render-view PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+        target_link_libraries(shizuku-render-view
+            PRIVATE
+                shizuku_correction
+                juce::juce_gui_basics
+            PUBLIC
+                juce::juce_recommended_config_flags
+                juce::juce_recommended_warning_flags)
+    endif()
 endif()

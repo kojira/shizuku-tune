@@ -38,7 +38,8 @@ struct CapturePlayback
 // mode (analyseSong, ReferenceSet, planCorrection, renderCorrection). Afterwards processBlock outputs the corrected
 // vocal at the playhead position where it differs from the input, and the input everywhere else (no latency;
 // identical in offline bounces). Captures are kept in <root>/<id>/ (root: ~/Library/Application Support/
-// ShizukuTune/captures, or $SHIZUKU_TUNE_CAPTURE_DIR); the plug-in state holds only the id and the settings.
+// ShizukuTune/captures on macOS, %APPDATA%/ShizukuTune/captures on Windows, or $SHIZUKU_TUNE_CAPTURE_DIR); the
+// plug-in state holds only the id and the settings.
 // $SHIZUKU_TUNE_CAPTURE_ARM_ON_START=1 arms a new instance as soon as the host has prepared it (for host tools
 // without a GUI).
 class CaptureSession final : public CorrectionModel,
