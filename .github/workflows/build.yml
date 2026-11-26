@@ -57,4 +57,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ShizukuTune-Windows-${{ matrix.arch }}-VST3
-          path: build/ShizukuTune_artefacts/Release/VST3/Shizuku Tune.vst3
+          # The parent folder, so the archive contains the "Shizuku Tune.vst3" bundle folder itself.
+          path: build/ShizukuTune_artefacts/Release/VST3
