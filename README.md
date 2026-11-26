@@ -38,9 +38,10 @@ Studio One や REAPER など ARA に対応したホストでは、ARA 版（Shiz
 
 1. GitHub の [Actions](https://github.com/kojira/shizuku-tune/actions) で最新の成功した build を開き、成果物 `ShizukuTune-Windows-x64-VST3`（ARM64 ネイティブの DAW なら `ShizukuTune-Windows-arm64-VST3`）をダウンロードして展開します。
 2. 中の `Shizuku Tune.vst3` を `C:\Program Files\Common Files\VST3` に置き、DAW でプラグインを再スキャンします。
-3. 使い方は上の取り込み方式と同じです: 歌のトラックに差し、伴奏をサイドチェーンに入れて **取り込み** を押し、1 回再生します。ARA に対応した DAW では ARA として使えば再生せずに解析できます。
+3. 使い方は上の取り込み方式と同じです: 歌のトラックに差し、伴奏をサイドチェーンに入れて **取り込み** を押し、1 回再生します。REAPER の例: 伴奏トラックのルーティング（ROUTE）で歌のトラックへセンドを作り、送り先を 3/4 チャンネルにします（歌のトラックのチャンネル数は 4 に）。プラグインの入出力ピン設定で 3/4 をサイドチェーン入力につなぎます。
+4. ARA に対応した DAW（REAPER は 6.x 以降）では、FX を追加する時に ARA の方（Shizuku Tune (ARA)）を選ぶと再生せずに解析できます。
 
-取り込みは `%APPDATA%\ShizukuTune\captures\` に保存されます。Windows の各 DAW での動作は未確認です。
+取り込みは `%APPDATA%\ShizukuTune\captures\` に保存されます。Windows の DAW（REAPER を含む）での動作は未確認です。
 
 ### ビルド
 
@@ -88,9 +89,10 @@ In ARA hosts (Studio One, REAPER, …) insert **Shizuku Tune (ARA)** to analyse 
 
 1. Open the latest successful `build` run under [Actions](https://github.com/kojira/shizuku-tune/actions) and download the `ShizukuTune-Windows-x64-VST3` artifact (`ShizukuTune-Windows-arm64-VST3` for ARM64-native DAWs).
 2. Put `Shizuku Tune.vst3` into `C:\Program Files\Common Files\VST3` and rescan plug-ins in the DAW.
-3. Use it as above: insert it on the vocal track, route the accompaniment to the side chain, press **取り込み** (Capture) and play once. In ARA-capable DAWs, use it as ARA to analyse without playing.
+3. Use it as above: insert it on the vocal track, route the accompaniment to the side chain, press **取り込み** (Capture) and play once. In REAPER, for example: in the accompaniment track's routing (ROUTE), add a send to the vocal track into channels 3/4 (set the vocal track to 4 channels), and connect 3/4 to the side-chain input in the plug-in's pin connector.
+4. In ARA-capable DAWs (REAPER 6.x and later), choose the ARA variant (Shizuku Tune (ARA)) when adding the FX to analyse without playing.
 
-Captures are stored in `%APPDATA%\ShizukuTune\captures\`. Operation in specific Windows DAWs is not yet verified.
+Captures are stored in `%APPDATA%\ShizukuTune\captures\`. Operation in Windows DAWs (including REAPER) is not yet verified.
 
 ### Building
 
