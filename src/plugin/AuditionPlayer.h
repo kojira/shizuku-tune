@@ -15,7 +15,8 @@ namespace shizuku
 // plug-in's output whether the host is playing or stopped. A preview stops when the host starts playing.
 // Message thread: play / playTone / stop. Audio thread: prepare, process (no allocation, no locks: the clip is
 // handed over through an atomic pointer; the message thread frees a clip only when the audio thread has
-// announced (hazard pointer) that it no longer uses it).
+// announced (hazard pointer) that it no longer uses it; after every block inUse equals the clip being played, so
+// a freed clip's address can only come back as a new clip when the audio thread has already left it).
 class AuditionPlayer
 {
 public:
