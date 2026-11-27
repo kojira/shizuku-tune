@@ -36,6 +36,13 @@ struct ReferenceTargets
     ReferenceApplyStats stats;
     double beatSeconds = 0.0; // beat length used for shifted matching (from the accompaniment's tempo)
     double tempoBpm = 0.0;
+    // The candidates with their offsets (also drawn in the editor), and what the targets were set from, for setting
+    // them again on notes changed by hand splits / merges (retargetNotes). referencesApplied is false when no
+    // reference is used (no candidates, or referenceNone).
+    std::vector<ReferenceCandidate> referenceCandidates;
+    bool referencesApplied = false;
+    ReferenceSelection selection;
+    ReferenceSelectionSettings selectionSettings;
 };
 
 // Reference melody candidates (.svp / .mid / guide .wav) shared by the ARA document controller and the capture

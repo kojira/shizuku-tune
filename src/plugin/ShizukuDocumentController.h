@@ -33,6 +33,7 @@ struct PlaybackData
 // ARA document controller: tracks which region sequence is the accompaniment / vocal, runs the whole-file
 // analysis and the correction on a background thread, and keeps all audio the renderers play in memory, so
 // playback never waits for the host's disk reads (the cause of silent/late real-time playback before).
+// Hand edits (playback time) re-render only around the edited notes and are stored in the ARA archive.
 class ShizukuDocumentController final : public juce::ARADocumentControllerSpecialisation,
                                         public CorrectionModel,
                                         private juce::AsyncUpdater,
@@ -71,6 +72,11 @@ public:
     void setReferenceChoice (int choice) override;
     bool canChooseReference() const override { return vocalTrack != nullptr; }
     std::vector<ReferenceCandidateInfo> getReferenceCandidates() const override;
+    std::shared_ptr<const CorrectionCurve> getAutomaticCorrection() const override;
+    std::shared_ptr<const std::vector<NoteWithKey>> getAutomaticTargets() const override;
+    std::shared_ptr<const ReferenceTargets> getReferenceTargets() const override { return latestReferenceTargets; }
+    bool isRendering() const override { return correctionJob != nullptr; }
+    bool getAuditionAudio (double startSeconds, double endSeconds, bool corrected, AuditionAudio& audio) const override;
 
     // Audio thread: current snapshot of in-memory audio. Never blocks for long, never frees memory.
     std::shared_ptr<const PlaybackData> getPlaybackData() const { return std::atomic_load (&playbackData); }
@@ -115,7 +121,9 @@ private:
     void handleAsyncUpdate() override;
     void timerCallback() override;
     void chooseDefaultTracks();
-    void startCorrection();
+    void noteEditsChanged() override;
+    void startCorrection(); // targets and automatic correction, then startRender
+    void startRender();     // the hand edits on top; per region only what changed since the last render
     void startLoadingMissingSources();
 
     // Reads a whole source through `reader` and publishes it in the playback data (any non-real-time thread).
@@ -142,6 +150,9 @@ private:
     ReferenceSet references;
     std::map<const juce::ARARegionSequence*, int> referenceChoiceByTrack; // missing: referenceAuto
     std::shared_ptr<const ReferenceTargets> latestReferenceTargets;       // message thread
+    std::shared_ptr<const CorrectionCurve> automaticCorrection;           // message thread
+    std::shared_ptr<const std::vector<NoteWithKey>> automaticTargets;
+    std::map<const juce::ARAPlaybackRegion*, std::shared_ptr<const LayeredRender>> regionRenders; // last published, reused
 
     juce::CriticalSection playbackDataWriteLock;
     std::shared_ptr<const PlaybackData> playbackData { std::make_shared<PlaybackData>() };
@@ -151,7 +162,7 @@ private:
     std::shared_ptr<const TrackAnalysisResult> latestResult;
     std::shared_ptr<const CorrectionCurve> latestCorrection;
     std::shared_ptr<const std::vector<NoteWithKey>> latestTargets;
-    juce::String statusText { "Choose the vocal and accompaniment tracks, then press Analyse." };
+    juce::String statusText { juce::String::fromUTF8 (u8"歌と伴奏のトラックを選んで「解析」を押してください。") };
 };
 
 } // namespace shizuku

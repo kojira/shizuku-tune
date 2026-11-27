@@ -269,4 +269,35 @@ std::vector<NoteOverride> resolveNoteEdits (const std::vector<NoteWithKey>& note
     return overrides;
 }
 
+NoteEditDocument shiftNoteEdits (const NoteEditDocument& document, double offsetSeconds)
+{
+    auto shifted = document;
+    for (auto& edit : shifted.structure)
+    {
+        edit.timeSeconds += offsetSeconds;
+        edit.startSeconds += offsetSeconds;
+        edit.endSeconds += offsetSeconds;
+    }
+    for (auto& edit : shifted.edits)
+    {
+        edit.startSeconds += offsetSeconds;
+        edit.endSeconds += offsetSeconds;
+    }
+    return shifted;
+}
+
+EditedNotes applyNoteEdits (const SongAnalysis& analysis, const NoteEditDocument& document, const std::vector<ReferenceCandidate>& candidates,
+                            const ReferenceSelection& selection, const ReferenceSelectionSettings& selectionSettings)
+{
+    EditedNotes edited;
+    edited.notes = analysis.notes;
+    if (! document.structure.empty())
+    {
+        edited.notes = applyNoteStructure (analysis, analysis.notes, document.structure, {}, &edited.unmatchedStructure);
+        retargetNotes (analysis, edited.notes, candidates, selection, selectionSettings);
+    }
+    edited.overrides = resolveNoteEdits (edited.notes, document.edits, {}, &edited.unmatchedEdits);
+    return edited;
+}
+
 } // namespace shizuku

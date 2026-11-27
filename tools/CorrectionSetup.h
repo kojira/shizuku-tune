@@ -30,15 +30,11 @@ struct PreparedCorrection
     WavData vocal;
     SongAnalysis analysis; // notes aligned to the chosen references, targets set from them
     std::string log;       // reference / tempo / candidate lines (and the per-phrase choice with describePhrases)
-    // Kept for retarget (notes changed by hand splits / merges).
+    // Kept for retargetNotes (notes changed by hand splits / merges).
     std::vector<ReferenceCandidate> candidates;
     ReferenceSelection selection;
     ReferenceSelectionSettings selectionSettings;
 };
-
-// Sets the targets of notes (e.g. analysis.notes after hand splits / merges) as prepareCorrection does: scale
-// targets, then the chosen references of prepared.selection (phrase note ranges recomputed) and the reach.
-void retarget (const PreparedCorrection& prepared, std::vector<NoteWithKey>& notes);
 
 // Reads the vocal and the accompaniment ("-" = none), analyses them and applies the reference candidates.
 // choose: -2 automatic per phrase, N: candidate N; bpmOverride < 0: tempo of the accompaniment.
@@ -47,7 +43,7 @@ PreparedCorrection prepareCorrection (const std::string& vocalPath, const std::s
                                       bool describePhrases);
 
 // The analysis with the hand edits applied: the document's splits / merges (applyNoteStructure, targets set
-// again with retarget) and the per-note overrides (resolveNoteEdits) on the resulting notes.
+// again with retargetNotes) and the per-note overrides (resolveNoteEdits) on the resulting notes.
 struct EditedAnalysis
 {
     SongAnalysis analysis;

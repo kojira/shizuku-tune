@@ -535,6 +535,27 @@ std::vector<double> referencePitchForErrors (const std::vector<NoteWithKey>& not
     return result;
 }
 
+void retargetNotes (const SongAnalysis& analysis, std::vector<NoteWithKey>& notes, const std::vector<ReferenceCandidate>& candidates,
+                    const ReferenceSelection& selection, const ReferenceSelectionSettings& settings)
+{
+    for (auto& entry : notes)
+    {
+        const auto aligned = entry.alignedReferenceNote;
+        const auto note = entry.note;
+        entry = NoteWithKey {};
+        entry.note = note;
+        entry.alignedReferenceNote = aligned;
+        entry.keyAtNote = keyAtTime (analysis.key, 0.5 * (note.startSeconds + note.endSeconds));
+        entry.nearestScaleMidi = analysis.hasAccompaniment ? nearestScaleMidiNote (entry.keyAtNote, note.centreMidi) : note.nearestMidi;
+    }
+    if (candidates.empty())
+        return;
+    auto reassigned = selection;
+    assignNotesToSegments (reassigned, notes);
+    applySelectedReferences (notes, candidates, reassigned, settings);
+    measureReach (notes, analysis.pitch);
+}
+
 void assignNotesToSegments (ReferenceSelection& selection, const std::vector<NoteWithKey>& notes)
 {
     // Each note belongs to the phrase it overlaps most (none: the nearest one before it keeps the range contiguous).

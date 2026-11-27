@@ -19,7 +19,7 @@ constexpr int64 replacedMergeGapSamples = 256;  // runs where the corrected voca
 constexpr uint32 hostSilentTimeoutMs = 3000;    // capturing and no audio for this long: the host stopped processing
 
 const Identifier stateType ("ShizukuTuneCapture"), idProperty ("captureId"), strengthProperty ("strength"),
-    thresholdProperty ("thresholdCents"), choiceProperty ("referenceChoice");
+    thresholdProperty ("thresholdCents"), choiceProperty ("referenceChoice"), editsProperty ("noteEdits");
 
 void addRange (std::vector<Range<int64>>& ranges, Range<int64> range)
 {
@@ -93,7 +93,7 @@ std::vector<Range<int64>> rangesFromVar (const var& value)
 }
 
 // What a corrected render depends on besides the captured audio (compared when a saved render is reused).
-var renderKey (const CorrectionSettings& settings, int choice, const StringArray& referencePaths)
+var renderKey (const CorrectionSettings& settings, int choice, const StringArray& referencePaths, const NoteEditDocument& edits)
 {
     auto object = std::make_unique<DynamicObject>();
     object->setProperty ("strength", settings.strength);
@@ -103,7 +103,30 @@ var renderKey (const CorrectionSettings& settings, int choice, const StringArray
     for (const auto& path : referencePaths)
         paths.add (path);
     object->setProperty ("references", paths);
+    if (hasNoteEdits (edits))
+    {
+        auto plain = edits; // "created" does not change the render
+        for (auto& edit : plain.edits)
+            edit.created = edit.version = {};
+        for (auto& edit : plain.structure)
+            edit.created = edit.version = {};
+        object->setProperty ("edits", String::fromUTF8 (toJson (plain).c_str()));
+    }
     return var (object.release());
+}
+
+NoteEditDocument noteEditsFromText (const String& text)
+{
+    if (text.trim().isEmpty())
+        return {};
+    try
+    {
+        return parseNoteEdits (text.toStdString());
+    }
+    catch (const std::exception&)
+    {
+        return {};
+    }
 }
 } // namespace
 
@@ -484,9 +507,11 @@ void CaptureSession::finishCapture()
     }
     captureId = Time::getCurrentTime().formatted ("%Y%m%d-%H%M%S-") + String::toHexString (Random::getSystemRandom().nextInt()).paddedLeft ('0', 8);
     captured = std::move (audio);
+    latestRender.reset(); // a new take: everything is rendered again
     detailText = dropped > 0 ? String::fromUTF8 (u8"取り込み中に処理が追いつかず ") + String (dropped) + String::fromUTF8 (u8" ブロック欠けました。取り込み直してください。")
                              : String();
     writeCaptureInfo();
+    writeNoteEdits(); // the edits stay (found again by time in the new capture)
     startAnalysis (captured, true);
 }
 
@@ -579,28 +604,49 @@ void CaptureSession::startCorrection()
         sendChangeMessage();
         return;
     }
+    auto targets = std::make_shared<ReferenceTargets> (references.applyTo (*latestResult, referenceChoice));
+    referenceTargets = targets;
+    automaticCorrection = std::make_shared<CorrectionCurve> (planCorrection (targets->analysis, correctionSettings));
+    automaticTargets = std::make_shared<std::vector<NoteWithKey>> (targets->analysis.notes);
+    startRender();
+}
+
+void CaptureSession::startRender()
+{
+    if (referenceTargets == nullptr || automaticCorrection == nullptr || captured == nullptr || latestResult == nullptr)
+    {
+        sendChangeMessage();
+        return;
+    }
+    const auto edited = planEditedCorrection (*referenceTargets, correctionSettings, getNoteEdits(), latestResult->timelineStartSeconds,
+                                              automaticCorrection, automaticTargets);
+    latestCorrection = edited.curve;
+    latestTargets = edited.notes;
     if (correctionRunning)
     {
-        correctionPending = true;
+        correctionPending = true; // rendered when the running job finishes
+        sendChangeMessage();
         return;
     }
     correctionPending = false;
 
-    auto targets = std::make_shared<ReferenceTargets> (references.applyTo (*latestResult, referenceChoice));
-    referenceTargets = targets;
-    auto curve = std::make_shared<CorrectionCurve> (planCorrection (targets->analysis, correctionSettings));
-    latestCorrection = curve;
-    latestTargets = std::make_shared<std::vector<NoteWithKey>> (targets->analysis.notes);
-    size_t numCorrected = 0;
-    for (const auto& note : curve->notes)
+    size_t numCorrected = 0, numEdited = 0;
+    for (const auto& note : edited.curve->notes)
+    {
         numCorrected += note.corrected ? 1 : 0;
-    const auto summary = String (numCorrected) + " / " + String ((int) curve->notes.size()) + String::fromUTF8 (u8" 音を補正（強さ ")
-                         + String (roundToInt (correctionSettings.strength * 100.0)) + String::fromUTF8 (u8"%、しきい値 ")
-                         + String (roundToInt (correctionSettings.thresholdCents)) + String::fromUTF8 (u8" セント）");
+        numEdited += note.edited ? 1 : 0;
+    }
+    auto summary = String (numCorrected) + " / " + String ((int) edited.curve->notes.size()) + String::fromUTF8 (u8" 音を補正（強さ ")
+                   + String (roundToInt (correctionSettings.strength * 100.0)) + String::fromUTF8 (u8"%、しきい値 ")
+                   + String (roundToInt (correctionSettings.thresholdCents)) + String::fromUTF8 (u8" セント）");
+    if (numEdited > 0)
+        summary << String::fromUTF8 (u8"、手直し ") << (int) numEdited << String::fromUTF8 (u8" 音");
+    if (edited.unmatchedEdits + edited.unmatchedStructure > 0)
+        summary << String::fromUTF8 (u8"、音が見つからない手直し ") << (int) (edited.unmatchedEdits + edited.unmatchedStructure);
 
     if (restoredRenderValid)
     {
-        // The saved corrected vocal was made with these settings and references: keep playing it.
+        // The saved corrected vocal was made with these settings, references and edits: keep playing it.
         restoredRenderValid = false;
         detailText = summary;
         state = State::ready;
@@ -612,17 +658,23 @@ void CaptureSession::startCorrection()
     state = State::analysing; // the previous corrected vocal keeps playing until the new one is published
     const auto audio = captured;
     const auto directory = captureDirectory();
-    const auto hint = medianVoicedFrequency (targets->analysis.pitch);
-    const auto key = renderKey (correctionSettings, referenceChoice, references.getPaths());
+    const auto hint = medianVoicedFrequency (referenceTargets->analysis.pitch);
+    const auto key = renderKey (correctionSettings, referenceChoice, references.getPaths(), getNoteEdits());
+    const auto automaticCurve = automaticCorrection;
+    const auto editedCurve = edited.curve;
+    const auto previous = latestRender;
     auto rendered = std::make_shared<std::shared_ptr<CapturePlayback>>();
+    auto layered = std::make_shared<std::shared_ptr<const LayeredRender>>();
     jobs.push_back (std::make_unique<Job> (
         generation,
-        [audio, curve, hint, directory, rendered]
+        [audio, automaticCurve, editedCurve, previous, hint, directory, rendered, layered]
         {
+            auto render = std::make_shared<const LayeredRender> (renderLayered (audio->vocal, audio->sampleRate, 0.0, hint, automaticCurve, editedCurve,
+                                                                                previous.get()));
             auto data = std::make_shared<CapturePlayback>();
             data->sampleRate = audio->sampleRate;
             data->originSample = audio->originSample;
-            data->corrected = renderCorrection (audio->vocal, audio->sampleRate, *curve, 0.0, hint);
+            data->corrected = render->output();
             data->replaced = differingRanges (*audio, data->corrected);
             if (directory.isDirectory())
             {
@@ -635,20 +687,58 @@ void CaptureSession::startCorrection()
                 }
             }
             *rendered = std::move (data);
+            *layered = std::move (render);
         },
-        [this, rendered, summary, key]
+        [this, rendered, layered, summary, key]
         {
             correctionRunning = false;
             publishPlayback (*rendered);
+            latestRender = *layered;
             renderedWith = key;
             writeCaptureInfo();
             detailText = summary;
             state = State::ready;
             if (correctionPending)
-                startCorrection();
+                startRender();
         }));
     jobPool.addJob (jobs.back().get(), false);
     sendChangeMessage();
+}
+
+void CaptureSession::noteEditsChanged()
+{
+    writeNoteEdits();
+    startRender();
+}
+
+void CaptureSession::writeNoteEdits() const
+{
+    if (captureId.isEmpty())
+        return;
+    const auto directory = captureDirectory();
+    if (! directory.createDirectory())
+        return;
+    auto document = getNoteEdits();
+    document.file = "vocal.wav";
+    directory.getChildFile ("edits.json").replaceWithText (String::fromUTF8 (toJson (document).c_str()));
+}
+
+bool CaptureSession::getAuditionAudio (double startSeconds, double endSeconds, bool corrected, AuditionAudio& audio) const
+{
+    if (captured == nullptr || captured->length() == 0)
+        return false;
+    const auto data = std::atomic_load (&playback);
+    const bool useCorrected = corrected && data != nullptr && ! data->corrected.empty();
+    const double rate = captured->sampleRate;
+    const auto first = jlimit<int64> (0, captured->length(), (int64) std::floor (startSeconds * rate) - captured->originSample);
+    const auto last = jlimit<int64> (first, captured->length(), (int64) std::ceil (endSeconds * rate) - captured->originSample);
+    if (last <= first)
+        return false;
+    audio.sampleRate = rate;
+    audio.channels.clear();
+    for (const auto& channel : useCorrected ? data->corrected : captured->vocal)
+        audio.channels.emplace_back (channel.begin() + first, channel.begin() + last);
+    return true;
 }
 
 void CaptureSession::publishPlayback (std::shared_ptr<const CapturePlayback> next)
@@ -817,6 +907,8 @@ ValueTree CaptureSession::saveState() const
     tree.setProperty (strengthProperty, correctionSettings.strength, nullptr);
     tree.setProperty (thresholdProperty, correctionSettings.thresholdCents, nullptr);
     tree.setProperty (choiceProperty, referenceChoice, nullptr);
+    if (hasNoteEdits (getNoteEdits()))
+        tree.setProperty (editsProperty, String::fromUTF8 (toJson (getNoteEdits()).c_str()), nullptr);
     return tree;
 }
 
@@ -835,6 +927,9 @@ void CaptureSession::restoreState (const ValueTree& tree)
     latestResult.reset();
     latestCorrection.reset();
     latestTargets.reset();
+    automaticCorrection.reset();
+    automaticTargets.reset();
+    latestRender.reset();
     referenceTargets.reset();
     references.clear();
     renderedWith = var();
@@ -846,13 +941,20 @@ void CaptureSession::restoreState (const ValueTree& tree)
     referenceChoice = tree.getProperty (choiceProperty, referenceAuto);
     captureId = tree.getProperty (idProperty).toString();
     detailText = {};
+    // Hand edits: from the plug-in state, else from the capture's edits.json.
+    const auto directory = captureDirectory();
+    if (tree.hasProperty (editsProperty))
+        noteEditHistory.reset (noteEditsFromText (tree.getProperty (editsProperty).toString()));
+    else if (captureId.isNotEmpty())
+        noteEditHistory.reset (noteEditsFromText (directory.getChildFile ("edits.json").loadFileAsString()));
+    else
+        noteEditHistory.reset ({});
     if (captureId.isEmpty())
     {
         sendChangeMessage();
         return;
     }
 
-    const auto directory = captureDirectory();
     const auto info = JSON::parse (directory.getChildFile ("capture.json"));
     if (! info.isObject())
     {
@@ -895,7 +997,7 @@ void CaptureSession::restoreState (const ValueTree& tree)
         const auto correctedFile = directory.getChildFile ("corrected.wav");
         const auto savedKey = info["correctedWith"];
         if (correctedFile.existsAsFile() && ! savedKey.isVoid()
-            && JSON::toString (savedKey) == JSON::toString (renderKey (correctionSettings, referenceChoice, references.getPaths())))
+            && JSON::toString (savedKey) == JSON::toString (renderKey (correctionSettings, referenceChoice, references.getPaths(), getNoteEdits())))
         {
             auto data = std::make_shared<CapturePlayback>();
             const auto corrected = readWav (correctedFile.getFullPathName().toStdString());

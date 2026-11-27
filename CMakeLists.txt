@@ -113,7 +113,7 @@ if(SHIZUKU_BUILD_PLUGIN)
         NEEDS_MIDI_INPUT FALSE
         NEEDS_MIDI_OUTPUT FALSE
         IS_MIDI_EFFECT FALSE
-        EDITOR_WANTS_KEYBOARD_FOCUS FALSE
+        EDITOR_WANTS_KEYBOARD_FOCUS TRUE
         IS_ARA_EFFECT TRUE
         COPY_PLUGIN_AFTER_BUILD FALSE
         AU_MAIN_TYPE kAudioUnitType_Effect
@@ -127,7 +127,10 @@ if(SHIZUKU_BUILD_PLUGIN)
         src/plugin/PitchLineView.cpp
         src/plugin/AraDiagnostics.cpp
         src/plugin/ReferenceSet.cpp
-        src/plugin/CaptureSession.cpp)
+        src/plugin/CaptureSession.cpp
+        src/plugin/NoteEditSession.cpp
+        src/plugin/NoteEditPanel.cpp
+        src/plugin/AuditionPlayer.cpp)
 
     target_compile_definitions(ShizukuTune PUBLIC
         JUCE_WEB_BROWSER=0

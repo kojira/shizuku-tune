@@ -3,6 +3,10 @@
 #include "ShizukuPluginProcessor.h"
 #include "AraDiagnostics.h"
 
+#include "MusicTheory.h"
+
+#include <mutex>
+
 namespace shizuku
 {
 
@@ -11,24 +15,167 @@ using namespace juce;
 namespace
 {
 constexpr int noTrackId = 1;
+constexpr int timerIntervalMs = 40;
+constexpr double dragPreviewSeconds = 1.2; // a dragged note is previewed for at most this long
+
+String ja (const char* text)
+{
+    return String::fromUTF8 (text);
+}
 } // namespace
 
 //==============================================================================
+// Renders a dragged note's audio at its new pitch in the background (renderCorrection with a constant shift
+// over the note), so the preview is the voice itself; the newest request wins.
+class ShizukuPluginEditor::PreviewRenderer final : private Thread
+{
+public:
+    PreviewRenderer() : Thread ("Shizuku Tune preview") { startThread(); }
+    ~PreviewRenderer() override
+    {
+        signalThreadShouldExit();
+        notify();
+        stopThread (2000);
+    }
+
+    // audio: the note's input audio (with some context); shiftSemitones applied between fadeIn / fadeOut seconds.
+    void request (AuditionAudio audio, double shiftSemitones, double hintHz)
+    {
+        {
+            const std::scoped_lock lock (mutex);
+            pending = Request { std::move (audio), shiftSemitones, hintHz, ++serial };
+            hasPending = true;
+        }
+        notify();
+    }
+
+    // Message thread: the newest finished render, if it answers the newest request.
+    bool takeResult (AuditionAudio& audio)
+    {
+        const std::scoped_lock lock (mutex);
+        if (! hasResult || resultSerial != serial)
+            return false;
+        hasResult = false;
+        audio = std::move (result);
+        return true;
+    }
+
+private:
+    struct Request
+    {
+        AuditionAudio audio;
+        double shift = 0.0, hint = 0.0;
+        int serial = 0;
+    };
+
+    void run() override
+    {
+        while (! threadShouldExit())
+        {
+            Request job;
+            {
+                const std::scoped_lock lock (mutex);
+                if (hasPending)
+                {
+                    job = std::move (pending);
+                    hasPending = false;
+                }
+            }
+            if (job.serial == 0)
+            {
+                wait (-1);
+                continue;
+            }
+            const double seconds = job.audio.channels.empty() ? 0.0 : (double) job.audio.channels[0].size() / job.audio.sampleRate;
+            CorrectionCurve curve;
+            curve.points = { { 0.0, job.shift, 1.0 }, { seconds, job.shift, 1.0 } };
+            AuditionAudio rendered;
+            rendered.sampleRate = job.audio.sampleRate;
+            rendered.channels = renderCorrection (job.audio.channels, job.audio.sampleRate, curve, 0.0, job.hint);
+            const std::scoped_lock lock (mutex);
+            result = std::move (rendered);
+            resultSerial = job.serial;
+            hasResult = true;
+        }
+    }
+
+    std::mutex mutex;
+    Request pending;
+    bool hasPending = false;
+    AuditionAudio result;
+    int resultSerial = 0, serial = 0;
+    bool hasResult = false;
+};
+
+//==============================================================================
 ShizukuPluginEditor::ShizukuPluginEditor (ShizukuPluginProcessor& pluginProcessor)
-    : AudioProcessorEditor (&pluginProcessor), AudioProcessorEditorARAExtension (&pluginProcessor), shizukuProcessor (pluginProcessor)
+    : AudioProcessorEditor (&pluginProcessor),
+      AudioProcessorEditorARAExtension (&pluginProcessor),
+      shizukuProcessor (pluginProcessor),
+      previewRenderer (std::make_unique<PreviewRenderer>())
 {
     for (auto* component : std::initializer_list<Component*> { &vocalLabel, &accompanimentLabel, &vocalChoice, &accompanimentChoice,
-                                                                 &analyseButton, &keyLabel, &statusLabel, &pitchLineView,
+                                                                 &analyseButton, &keyLabel, &statusLabel, &pitchLineView, &noteEditPanel,
                                                                  &strengthLabel, &strengthSlider, &thresholdLabel, &thresholdSlider,
                                                                  &referenceButton, &clearReferenceButton, &referenceLabel,
                                                                  &referenceChoiceLabel, &referenceChoice, &captureButton, &finishButton,
-                                                                 &captureRangeLabel })
+                                                                 &captureRangeLabel, &zoomInButton, &zoomOutButton, &showAllButton,
+                                                                 &followButton, &showReferenceButton })
         addAndMakeVisible (component);
+
+    vocalLabel.setText (ja (u8"歌のトラック"), dontSendNotification);
+    accompanimentLabel.setText (ja (u8"伴奏のトラック"), dontSendNotification);
+    analyseButton.setButtonText (ja (u8"解析"));
+    strengthLabel.setText (ja (u8"強さ"), dontSendNotification);
+    thresholdLabel.setText (ja (u8"しきい値"), dontSendNotification);
+    referenceButton.setButtonText (ja (u8"正解を追加…"));
+    clearReferenceButton.setButtonText (ja (u8"消す"));
+    referenceChoiceLabel.setText (ja (u8"正解のメロディー"), dontSendNotification);
+
+    zoomInButton.setButtonText ("+");
+    zoomInButton.setTooltip (ja (u8"拡大"));
+    zoomOutButton.setButtonText (String::fromUTF8 (u8"−"));
+    zoomOutButton.setTooltip (ja (u8"縮小"));
+    showAllButton.setButtonText (ja (u8"全体"));
+    followButton.setButtonText (ja (u8"再生に追従"));
+    followButton.setClickingTogglesState (true);
+    followButton.setToggleState (follow, dontSendNotification);
+    followButton.onClick = [this] { follow = followButton.getToggleState(); };
+    showReferenceButton.setButtonText (ja (u8"正解を表示"));
+    showReferenceButton.setClickingTogglesState (true);
+    showReferenceButton.setToggleState (true, dontSendNotification);
+    showReferenceButton.onClick = [this] { pitchLineView.setShowReference (showReferenceButton.getToggleState()); };
+    zoomInButton.onClick = [this]
+    {
+        const auto range = pitchLineView.getVisibleRange();
+        pitchLineView.zoom (0.5, shizukuProcessor.isHostPlaying() ? shizukuProcessor.getHostPositionSeconds() : range.getStart() + 0.5 * range.getLength());
+    };
+    zoomOutButton.onClick = [this]
+    {
+        const auto range = pitchLineView.getVisibleRange();
+        pitchLineView.zoom (2.0, range.getStart() + 0.5 * range.getLength());
+    };
+    showAllButton.onClick = [this] { pitchLineView.showAll(); };
+
+    // Hand editing and previews.
+    pitchLineView.onSelectionChanged = [this] { noteEditPanel.refresh(); };
+    pitchLineView.onNoteClicked = [this] (size_t)
+    {
+        const auto& selection = pitchLineView.getSelection();
+        if (selection.empty())
+            return;
+        const auto first = pitchLineView.noteSpan (selection.front()), last = pitchLineView.noteSpan (selection.back());
+        previewRange (first.getStart(), last.getEnd());
+    };
+    pitchLineView.onRangeSelected = [this] (Range<double> range) { previewRange (range.getStart(), range.getEnd()); };
+    pitchLineView.onDragStep = [this] (size_t note, int semitones) { previewNoteAt (note, semitones); };
+    pitchLineView.onNotesDragged = [this] (std::vector<size_t> notes, int semitones) { noteEditPanel.moveNotesBySemitones (notes, semitones); };
+    setWantsKeyboardFocus (true);
 
     strengthSlider.setRange (0.0, 100.0, 1.0);
     strengthSlider.setTextValueSuffix (" %");
     thresholdSlider.setRange (0.0, 50.0, 1.0);
-    thresholdSlider.setTextValueSuffix (" cents");
+    thresholdSlider.setTextValueSuffix (ja (u8" セント"));
     for (auto* slider : { &strengthSlider, &thresholdSlider })
     {
         slider->setSliderStyle (Slider::LinearHorizontal);
@@ -41,7 +188,7 @@ ShizukuPluginEditor::ShizukuPluginEditor (ShizukuPluginProcessor& pluginProcesso
     {
         if (model == nullptr)
             return;
-        referenceChooser = std::make_unique<FileChooser> ("Reference melody candidates (Synthesizer V .svp, MIDI .mid, or guide .wav)",
+        referenceChooser = std::make_unique<FileChooser> (ja (u8"正解のメロディーの候補（Synthesizer V .svp、MIDI .mid、ガイドの .wav）"),
                                                           File(), "*.svp;*.mid;*.midi;*.wav");
         referenceChooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles
                                            | FileBrowserComponent::canSelectMultipleItems,
@@ -108,10 +255,8 @@ ShizukuPluginEditor::ShizukuPluginEditor (ShizukuPluginProcessor& pluginProcesso
     finishButton.onClick = [this] { shizukuProcessor.getCaptureSession().finishCapture(); };
 
     if (! attachToARA())
-    {
         showCaptureMode (true);
-        startTimer (250);
-    }
+    startTimer (timerIntervalMs);
 
     // ARA editors must be resizable for host integration.
     setResizable (true, false);
@@ -141,6 +286,7 @@ void ShizukuPluginEditor::setModel (CorrectionModel* newModel)
     if (model != nullptr)
         model->removeChangeListener (this);
     model = newModel;
+    noteEditPanel.setModel (model);
     if (model == nullptr)
         return;
     const auto settings = model->getCorrectionSettings();
@@ -156,12 +302,6 @@ void ShizukuPluginEditor::showCaptureMode (bool shouldShow)
         component->setVisible (! shouldShow);
     for (auto* component : std::initializer_list<Component*> { &captureButton, &finishButton, &captureRangeLabel })
         component->setVisible (shouldShow);
-    strengthLabel.setText (shouldShow ? String::fromUTF8 (u8"強さ") : String ("Strength"), dontSendNotification);
-    thresholdLabel.setText (shouldShow ? String::fromUTF8 (u8"しきい値") : String ("Threshold"), dontSendNotification);
-    thresholdSlider.setTextValueSuffix (shouldShow ? String::fromUTF8 (u8" セント") : String (" cents"));
-    referenceButton.setButtonText (shouldShow ? String::fromUTF8 (u8"正解を追加…") : String ("Add reference..."));
-    clearReferenceButton.setButtonText (shouldShow ? String::fromUTF8 (u8"消す") : String ("Clear"));
-    referenceChoiceLabel.setText (shouldShow ? String::fromUTF8 (u8"正解のメロディー") : String ("Correct melody"), dontSendNotification);
     if (shouldShow)
         setModel (&shizukuProcessor.getCaptureSession());
     resized();
@@ -184,8 +324,77 @@ void ShizukuPluginEditor::refreshCapture()
 
 void ShizukuPluginEditor::timerCallback()
 {
-    if (attachToARA())
-        stopTimer();
+    if (documentController == nullptr)
+        attachToARA();
+
+    // Host playhead (and follow while playing).
+    const bool playing = shizukuProcessor.isHostPlaying();
+    const auto position = shizukuProcessor.getHostPositionSeconds();
+    pitchLineView.setPlayhead (position, playing || position > 0.0);
+    if (playing && follow)
+        pitchLineView.keepVisible (position);
+
+    // A dragged note's voice at its new pitch, when it is ready.
+    AuditionAudio rendered;
+    if (previewRenderer->takeResult (rendered))
+        shizukuProcessor.getAuditionPlayer().play (rendered);
+
+    pitchLineView.setBusyText (model != nullptr && model->isRendering() ? ja (u8"作り直し中…") : String());
+}
+
+bool ShizukuPluginEditor::keyPressed (const KeyPress& key)
+{
+    if (model == nullptr)
+        return false;
+    if (key.getModifiers().isCommandDown() && (key.getKeyCode() == 'Z' || key.getKeyCode() == 'z'))
+    {
+        if (key.getModifiers().isShiftDown())
+            model->redoNoteEdit();
+        else
+            model->undoNoteEdit();
+        return true;
+    }
+    if (key.getModifiers().isCommandDown() && (key.getKeyCode() == 'Y' || key.getKeyCode() == 'y'))
+    {
+        model->redoNoteEdit();
+        return true;
+    }
+    if (key == KeyPress::upKey || key == KeyPress::downKey)
+    {
+        noteEditPanel.moveSelectedBySemitones (key == KeyPress::upKey ? 1 : -1);
+        return true;
+    }
+    return false;
+}
+
+void ShizukuPluginEditor::previewRange (double startSeconds, double endSeconds)
+{
+    if (model == nullptr || shizukuProcessor.isHostPlaying())
+        return; // while the host plays, the playback itself is what is heard
+    const double length = jlimit (0.25, AuditionPlayer::maxSeconds, endSeconds - startSeconds);
+    const double from = endSeconds - startSeconds < 0.25 ? startSeconds - 0.1 : startSeconds;
+    AuditionAudio audio;
+    if (model->getAuditionAudio (from, from + length, true, audio))
+        shizukuProcessor.getAuditionPlayer().play (audio);
+}
+
+void ShizukuPluginEditor::previewNoteAt (size_t note, int semitones)
+{
+    if (model == nullptr)
+        return;
+    const double targetMidi = pitchLineView.currentTargetMidi (note) + semitones;
+    auto& player = shizukuProcessor.getAuditionPlayer();
+    // A short tone right away; replaced by the voice at that pitch when it has been rendered.
+    player.playTone (targetMidi);
+    const auto targets = model->getLatestTargets();
+    const auto result = model->getLatestResult();
+    if (targets == nullptr || result == nullptr || note >= targets->size())
+        return;
+    const auto span = pitchLineView.noteSpan (note);
+    AuditionAudio audio;
+    if (! model->getAuditionAudio (span.getStart(), span.getStart() + jmin (dragPreviewSeconds, span.getLength()), false, audio))
+        return;
+    previewRenderer->request (std::move (audio), targetMidi - (*targets)[note].note.centreMidi, medianVoicedFrequency (result->analysis.pitch));
 }
 
 ShizukuPluginEditor::~ShizukuPluginEditor()
@@ -193,6 +402,7 @@ ShizukuPluginEditor::~ShizukuPluginEditor()
     stopTimer();
     if (model != nullptr)
         model->removeChangeListener (this);
+    shizukuProcessor.getAuditionPlayer().stop();
 }
 
 void ShizukuPluginEditor::paint (Graphics& g)
@@ -239,7 +449,20 @@ void ShizukuPluginEditor::resized()
     referenceRow.removeFromLeft (8);
     referenceLabel.setBounds (referenceRow);
     area.removeFromTop (4);
+    auto viewRow = area.removeFromTop (24);
+    zoomOutButton.setBounds (viewRow.removeFromLeft (28));
+    viewRow.removeFromLeft (2);
+    zoomInButton.setBounds (viewRow.removeFromLeft (28));
+    viewRow.removeFromLeft (2);
+    showAllButton.setBounds (viewRow.removeFromLeft (52));
+    viewRow.removeFromLeft (8);
+    followButton.setBounds (viewRow.removeFromLeft (96));
+    viewRow.removeFromLeft (4);
+    showReferenceButton.setBounds (viewRow.removeFromLeft (96));
+    area.removeFromTop (4);
     statusLabel.setBounds (area.removeFromBottom (22));
+    area.removeFromBottom (4);
+    noteEditPanel.setBounds (area.removeFromBottom (92));
     area.removeFromBottom (4);
     pitchLineView.setBounds (area);
 }
@@ -259,7 +482,7 @@ void ShizukuPluginEditor::refreshTrackChoices()
     for (auto* box : { &vocalChoice, &accompanimentChoice })
     {
         box->clear (dontSendNotification);
-        box->addItem ("(none)", noTrackId);
+        box->addItem (ja (u8"（なし）"), noTrackId);
         for (size_t i = 0; i < trackChoices.size(); ++i)
         {
             auto name = ShizukuDocumentController::getTrackName (*trackChoices[i]);
@@ -314,8 +537,8 @@ void ShizukuPluginEditor::refreshReferenceChoices()
     for (size_t c = 0; c < candidates.size(); ++c)
     {
         const auto& info = candidates[c];
-        referenceChoice.addItem (info.name + "  (match " + String (roundToInt (info.looseMatch * 100.0)) + "%, present "
-                                     + String (roundToInt (info.presence * 100.0)) + "%, offset " + String (info.offsetSeconds, 2) + " s)",
+        referenceChoice.addItem (info.name + ja (u8"（一致 ") + String (roundToInt (info.looseMatch * 100.0)) + ja (u8"%、ある所 ")
+                                     + String (roundToInt (info.presence * 100.0)) + ja (u8"%、ずれ ") + String (info.offsetSeconds, 2) + ja (u8" 秒）"),
                                  (int) c + 3);
     }
     referenceChoice.setSelectedId (choice + 3, dontSendNotification);
@@ -330,17 +553,49 @@ void ShizukuPluginEditor::refreshResult()
     const auto result = model->getLatestResult();
     pitchLineView.setResult (result);
     pitchLineView.setCorrection (model->getLatestCorrection(), model->getLatestTargets());
+    refreshReferenceNotes();
+    noteEditPanel.refresh();
     if (result != nullptr && result->analysis.hasAccompaniment)
     {
-        String text = (documentController == nullptr ? String::fromUTF8 (u8"キー: ") : String ("Key: ")) + String (keyName (result->analysis.key.globalKey));
+        String text = ja (u8"キー: ") + String (keyName (result->analysis.key.globalKey));
         if (result->analysis.key.segments.size() > 1)
-            text << " (" << (int) result->analysis.key.segments.size() << (documentController == nullptr ? String::fromUTF8 (u8" 区間)") : String (" sections)"));
+            text << " (" << (int) result->analysis.key.segments.size() << ja (u8" 区間)");
         keyLabel.setText (text, dontSendNotification);
     }
     else
     {
-        keyLabel.setText (documentController == nullptr ? String::fromUTF8 (u8"キー: -") : String ("Key: -"), dontSendNotification);
+        keyLabel.setText (ja (u8"キー: -"), dontSendNotification);
     }
+}
+
+void ShizukuPluginEditor::refreshReferenceNotes()
+{
+    // The correct melody as used: per phrase the chosen candidate's notes (with its offset and beat shift).
+    std::vector<DrawnReferenceNote> notes;
+    const auto targets = model->getReferenceTargets();
+    const auto result = model->getLatestResult();
+    if (targets != nullptr && result != nullptr && targets->referencesApplied)
+    {
+        const auto& selection = targets->selection;
+        for (const auto& segment : selection.segments)
+        {
+            if (segment.candidate < 0 || (size_t) segment.candidate >= targets->referenceCandidates.size())
+                continue;
+            const auto& candidate = targets->referenceCandidates[(size_t) segment.candidate];
+            const double offset = candidate.offsetSeconds + segment.chosenShiftBeats() * selection.beatSeconds;
+            for (const auto& note : candidate.melody.notes)
+            {
+                const double start = note.startSeconds + offset, end = note.endSeconds + offset;
+                if (end <= segment.startSeconds || start >= segment.endSeconds)
+                    continue;
+                if (segment.part >= 0 && note.part != segment.part)
+                    continue;
+                notes.push_back ({ result->timelineStartSeconds + jmax (start, segment.startSeconds),
+                                   result->timelineStartSeconds + jmin (end, segment.endSeconds), note.midi + 12 * segment.octave });
+            }
+        }
+    }
+    pitchLineView.setReferenceNotes (std::move (notes));
 }
 
 } // namespace shizuku

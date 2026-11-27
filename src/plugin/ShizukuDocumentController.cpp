@@ -75,7 +75,7 @@ bool readSources (std::vector<SourceToLoad>& toLoad, LoadedSources& loaded, cons
             const auto count = (int) std::min<int64> (chunkSize, length - done);
             if (! reader.read (&chunk, 0, count, done, true, true))
             {
-                error = "Could not read audio from the host (sample access unavailable).";
+                error = String::fromUTF8 (u8"ホストから音を読めませんでした（音へのアクセスが使えません）。");
                 return false;
             }
             for (int c = 0; c < numChannels; ++c)
@@ -217,11 +217,13 @@ public:
         std::shared_ptr<const SourceAudio> source;
         int64 startInSourceSamples = 0, numSourceSamples = 0;
         double startInAnalysisSeconds = 0.0;
+        std::shared_ptr<const LayeredRender> previous; // last render of this region (unchanged parts are reused)
     };
 
-    CorrectionJob (ShizukuDocumentController& ownerIn, std::shared_ptr<const CorrectionCurve> curveIn, double fundamentalHintHzIn,
-                   std::vector<RegionTask> tasksIn)
+    CorrectionJob (ShizukuDocumentController& ownerIn, std::shared_ptr<const CorrectionCurve> automaticCurveIn,
+                   std::shared_ptr<const CorrectionCurve> curveIn, double fundamentalHintHzIn, std::vector<RegionTask> tasksIn)
         : ThreadPoolJob ("Shizuku Tune correction"),
+          automaticCurve (std::move (automaticCurveIn)),
           curve (std::move (curveIn)),
           owner (ownerIn),
           fundamentalHintHz (fundamentalHintHzIn),
@@ -248,20 +250,29 @@ public:
                 excerpt.emplace_back (channel.begin() + first, channel.begin() + last);
             const double sampleZeroSeconds = task.startInAnalysisSeconds + (double) (first - task.startInSourceSamples) / rate;
 
+            auto layered = std::make_shared<const LayeredRender> (renderLayered (excerpt, rate, sampleZeroSeconds, fundamentalHintHz, automaticCurve, curve,
+                                                                                 task.previous.get()));
             auto corrected = std::make_shared<SourceAudio>();
             corrected->sampleRate = rate;
             corrected->firstSample = first;
-            corrected->channels = renderCorrection (excerpt, rate, *curve, sampleZeroSeconds, fundamentalHintHz);
-            results.emplace_back (task.region, std::move (corrected));
+            corrected->channels = layered->output();
+            results.push_back ({ task.region, std::move (corrected), std::move (layered) });
         }
         finished = true;
         owner.triggerAsyncUpdate();
         return jobHasFinished;
     }
 
+    struct RegionResult
+    {
+        const ARAPlaybackRegion* region = nullptr;
+        std::shared_ptr<const SourceAudio> audio;
+        std::shared_ptr<const LayeredRender> layered;
+    };
+
     std::atomic<bool> finished { false };
-    std::shared_ptr<const CorrectionCurve> curve;
-    std::vector<std::pair<const ARAPlaybackRegion*, std::shared_ptr<const SourceAudio>>> results;
+    std::shared_ptr<const CorrectionCurve> automaticCurve, curve;
+    std::vector<RegionResult> results;
 
 private:
     ShizukuDocumentController& owner;
@@ -301,7 +312,7 @@ String ShizukuDocumentController::getTrackName (ARARegionSequence& track)
 {
     if (const auto& name = track.getName())
         return String::fromUTF8 (name);
-    return "Track " + String (track.getOrderIndex() + 1);
+    return String::fromUTF8 (u8"トラック ") + String (track.getOrderIndex() + 1);
 }
 
 bool ShizukuDocumentController::looksLikeAccompaniment (const String& trackName)
@@ -358,9 +369,9 @@ void ShizukuDocumentController::chooseDefaultTracks()
 String ShizukuDocumentController::startAnalysis()
 {
     if (analysisJob != nullptr)
-        return "Analysis is already running.";
+        return String::fromUTF8 (u8"解析中です。");
     if (vocalTrack == nullptr && accompanimentTrack == nullptr)
-        return "Choose a vocal track and/or an accompaniment track first.";
+        return String::fromUTF8 (u8"先に歌か伴奏のトラックを選んでください。");
 
     const auto snapshot = getPlaybackData();
     std::vector<SourceToLoad> toLoad;
@@ -387,7 +398,7 @@ String ShizukuDocumentController::startAnalysis()
                      && std::none_of (toLoad.begin(), toLoad.end(), [source] (const SourceToLoad& item) { return item.source == source; }))
             {
                 if (! source->isSampleAccessEnabled())
-                    return "The host has not enabled sample access for track \"" + plan.name + "\".";
+                    return String::fromUTF8 (u8"ホストがトラック「") + plan.name + String::fromUTF8 (u8"」の音を読ませてくれません。");
                 toLoad.push_back ({ source, std::make_unique<ARAAudioSourceReader> (source) });
             }
 
@@ -415,7 +426,7 @@ String ShizukuDocumentController::startAnalysis()
         if (error.isNotEmpty())
             return error;
     if (vocalPlan.regions.empty() && accompanimentPlan.regions.empty())
-        return "The selected tracks have no regions.";
+        return String::fromUTF8 (u8"選んだトラックにリージョンがありません。");
 
     for (auto& region : newVocalRegions)
         region.startInAnalysisSeconds -= timelineStart; // playback time -> analysis time
@@ -426,7 +437,7 @@ String ShizukuDocumentController::startAnalysis()
     jobPool.addJob (analysisJob.get(), false);
     {
         const ScopedLock lock (resultLock);
-        statusText = "Analysing...";
+        statusText = String::fromUTF8 (u8"解析中…");
     }
     sendChangeMessage();
     return {};
@@ -474,10 +485,10 @@ std::vector<ReferenceCandidateInfo> ShizukuDocumentController::getReferenceCandi
 
 String ShizukuDocumentController::getReferenceDescription() const
 {
-    return references.describe (latestReferenceTargets.get(), getReferenceChoice());
+    return references.describe (latestReferenceTargets.get(), getReferenceChoice(), true);
 }
 
-// Applies the reference (if any) to the analysed notes, plans the correction and starts rendering it.
+// Applies the reference (if any) to the analysed notes and plans the automatic correction, then renders.
 void ShizukuDocumentController::startCorrection()
 {
     std::shared_ptr<const TrackAnalysisResult> base;
@@ -490,24 +501,46 @@ void ShizukuDocumentController::startCorrection()
         sendChangeMessage();
         return;
     }
+    // Reference targets on a copy of the analysis (the stored result keeps the key-scale targets).
+    auto targets = std::make_shared<ReferenceTargets> (references.applyTo (*base, getReferenceChoice()));
+    latestReferenceTargets = targets;
+    {
+        const ScopedLock lock (resultLock);
+        automaticCorrection = std::make_shared<CorrectionCurve> (planCorrection (targets->analysis, correctionSettings));
+        automaticTargets = std::make_shared<std::vector<NoteWithKey>> (targets->analysis.notes);
+    }
+    startRender();
+}
+
+// Plans the hand edits on top of the automatic correction and starts rendering the vocal regions.
+void ShizukuDocumentController::startRender()
+{
+    std::shared_ptr<const TrackAnalysisResult> base;
+    {
+        const ScopedLock lock (resultLock);
+        base = latestResult;
+    }
+    if (base == nullptr || latestReferenceTargets == nullptr || automaticCorrection == nullptr)
+    {
+        sendChangeMessage();
+        return;
+    }
+    const auto& analysis = latestReferenceTargets->analysis;
+    const auto edited = planEditedCorrection (*latestReferenceTargets, correctionSettings, getNoteEdits(), base->timelineStartSeconds,
+                                              automaticCorrection, automaticTargets);
+    {
+        const ScopedLock lock (resultLock);
+        latestCorrection = edited.curve;
+        latestTargets = edited.notes;
+    }
     if (correctionJob != nullptr)
     {
         correctionJob->signalJobShouldExit();
         correctionPending = true; // restarted when the running job finishes
+        sendChangeMessage();
         return;
     }
     correctionPending = false;
-
-    // Reference targets on a copy of the analysis (the stored result keeps the key-scale targets).
-    auto targets = std::make_shared<ReferenceTargets> (references.applyTo (*base, getReferenceChoice()));
-    latestReferenceTargets = targets;
-    const auto& analysis = targets->analysis;
-    auto curve = std::make_shared<CorrectionCurve> (planCorrection (analysis, correctionSettings));
-    {
-        const ScopedLock lock (resultLock);
-        latestCorrection = curve;
-        latestTargets = std::make_shared<std::vector<NoteWithKey>> (analysis.notes);
-    }
 
     const auto snapshot = getPlaybackData();
     std::vector<CorrectionJob::RegionTask> tasks;
@@ -516,15 +549,75 @@ void ShizukuDocumentController::startCorrection()
         const auto it = snapshot->sources.find (region.source);
         if (it == snapshot->sources.end())
             continue;
-        tasks.push_back ({ region.region, it->second, region.startInSourceSamples, region.numSourceSamples, region.startInAnalysisSeconds });
+        const auto previous = regionRenders.find (region.region);
+        tasks.push_back ({ region.region, it->second, region.startInSourceSamples, region.numSourceSamples, region.startInAnalysisSeconds,
+                           previous != regionRenders.end() ? previous->second : nullptr });
     }
-    correctionJob = std::make_unique<CorrectionJob> (*this, curve, medianVoicedFrequency (analysis.pitch), std::move (tasks));
+    correctionJob = std::make_unique<CorrectionJob> (*this, automaticCorrection, edited.curve, medianVoicedFrequency (analysis.pitch), std::move (tasks));
     jobPool.addJob (correctionJob.get(), false);
     {
         const ScopedLock lock (resultLock);
-        statusText = "Rendering corrected vocal...";
+        statusText = String::fromUTF8 (u8"補正した歌を作っています…");
     }
     sendChangeMessage();
+}
+
+void ShizukuDocumentController::noteEditsChanged()
+{
+    startRender();
+}
+
+std::shared_ptr<const CorrectionCurve> ShizukuDocumentController::getAutomaticCorrection() const
+{
+    const ScopedLock lock (resultLock);
+    return automaticCorrection;
+}
+
+std::shared_ptr<const std::vector<NoteWithKey>> ShizukuDocumentController::getAutomaticTargets() const
+{
+    const ScopedLock lock (resultLock);
+    return automaticTargets;
+}
+
+bool ShizukuDocumentController::getAuditionAudio (double startSeconds, double endSeconds, bool corrected, AuditionAudio& audio) const
+{
+    const auto snapshot = getPlaybackData();
+    double timelineStart = 0.0;
+    {
+        const ScopedLock lock (resultLock);
+        if (latestResult == nullptr)
+            return false;
+        timelineStart = latestResult->timelineStartSeconds;
+    }
+    for (const auto& region : vocalRegions)
+    {
+        const double regionStart = timelineStart + region.startInAnalysisSeconds;
+        const double rate = region.sourceSampleRate;
+        const double regionEnd = regionStart + (double) region.numSourceSamples / rate;
+        if (startSeconds >= regionEnd || endSeconds <= regionStart)
+            continue;
+        const auto sourceIt = snapshot->sources.find (region.source);
+        if (sourceIt == snapshot->sources.end())
+            return false;
+        const SourceAudio* excerpt = nullptr;
+        if (corrected)
+            if (const auto it = snapshot->corrected.find (region.region); it != snapshot->corrected.end())
+                excerpt = it->second.get();
+        const auto& original = *sourceIt->second;
+        const auto first = region.startInSourceSamples + (int64) std::floor ((jmax (startSeconds, regionStart) - regionStart) * rate);
+        const auto last = region.startInSourceSamples + (int64) std::ceil ((jmin (endSeconds, regionEnd) - regionStart) * rate);
+        audio.sampleRate = rate;
+        audio.channels.assign (original.channels.size(), {});
+        for (size_t c = 0; c < original.channels.size(); ++c)
+            for (auto i = first; i < last; ++i)
+            {
+                const SourceAudio& from = excerpt != nullptr && i >= excerpt->firstSample && i < excerpt->firstSample + excerpt->numSamples() ? *excerpt : original;
+                const auto local = i - from.firstSample;
+                audio.channels[c].push_back (local >= 0 && local < from.numSamples() ? from.channels[c][(size_t) local] : 0.0f);
+            }
+        return last > first;
+    }
+    return false;
 }
 
 //==============================================================================
@@ -630,13 +723,13 @@ void ShizukuDocumentController::handleAsyncUpdate()
             {
                 latestResult = analysisJob->result;
                 const auto& analysis = latestResult->analysis;
-                statusText = "Analysed: " + String ((int) analysis.notes.size()) + " notes"
-                             + (analysis.hasAccompaniment ? ", key " + String (keyName (analysis.key.globalKey)) : String());
+                statusText = String::fromUTF8 (u8"解析しました: ") + String ((int) analysis.notes.size()) + String::fromUTF8 (u8" 音")
+                             + (analysis.hasAccompaniment ? String::fromUTF8 (u8"、キー ") + String (keyName (analysis.key.globalKey)) : String());
                 analysed = true;
             }
             else
             {
-                statusText = analysisJob->errorText.isNotEmpty() ? analysisJob->errorText : String ("Analysis cancelled.");
+                statusText = analysisJob->errorText.isNotEmpty() ? analysisJob->errorText : String::fromUTF8 (u8"解析を中止しました。");
             }
         }
         analysisJob.reset();
@@ -653,26 +746,33 @@ void ShizukuDocumentController::handleAsyncUpdate()
             for (const auto& region : vocalRegions)
                 currentRegions.insert (region.region);
             const auto results = correctionJob->results;
+            regionRenders.clear();
+            for (const auto& result : results)
+                if (currentRegions.count (result.region) != 0)
+                    regionRenders[result.region] = result.layered;
             updatePlaybackData ([&] (PlaybackData& data)
                                 {
                                     data.corrected.clear();
-                                    for (const auto& [region, audio] : results)
-                                        if (currentRegions.count (region) != 0)
-                                            data.corrected[region] = audio;
+                                    for (const auto& result : results)
+                                        if (currentRegions.count (result.region) != 0)
+                                            data.corrected[result.region] = result.audio;
                                 });
-            size_t numCorrected = 0;
+            size_t numCorrected = 0, numEdited = 0;
             for (const auto& note : correctionJob->curve->notes)
+            {
                 numCorrected += note.corrected ? 1 : 0;
+                numEdited += note.edited ? 1 : 0;
+            }
             const ScopedLock lock (resultLock);
-            statusText = "Corrected " + String ((int) numCorrected) + " of " + String ((int) correctionJob->curve->notes.size())
-                         + " notes (strength " + String (roundToInt (correctionSettings.strength * 100.0)) + "%, threshold "
-                         + String (roundToInt (correctionSettings.thresholdCents)) + " cents)";
-            if (latestResult != nullptr && latestResult->analysis.hasAccompaniment)
-                statusText << ", key " << keyName (latestResult->analysis.key.globalKey);
+            statusText = String ((int) numCorrected) + " / " + String ((int) correctionJob->curve->notes.size())
+                         + String::fromUTF8 (u8" 音を補正（強さ ") + String (roundToInt (correctionSettings.strength * 100.0)) + String::fromUTF8 (u8"%、しきい値 ")
+                         + String (roundToInt (correctionSettings.thresholdCents)) + String::fromUTF8 (u8" セント）");
+            if (numEdited > 0)
+                statusText << String::fromUTF8 (u8"、手直し ") << (int) numEdited << String::fromUTF8 (u8" 音");
         }
         correctionJob.reset();
         if (correctionPending)
-            startCorrection();
+            startRender();
     }
     sendChangeMessage();
 }
@@ -749,6 +849,7 @@ void ShizukuDocumentController::willDestroyAudioSource (ARAAudioSource* source)
 
 void ShizukuDocumentController::willDestroyPlaybackRegion (ARAPlaybackRegion* region)
 {
+    regionRenders.erase (region);
     updatePlaybackData ([region] (PlaybackData& data) { data.corrected.erase (region); });
     vocalRegions.erase (std::remove_if (vocalRegions.begin(), vocalRegions.end(),
                                         [region] (const VocalRegion& entry) { return entry.region == region; }),
@@ -760,15 +861,30 @@ ARAPlaybackRenderer* ShizukuDocumentController::doCreatePlaybackRenderer() noexc
     return new ShizukuPlaybackRenderer (getDocumentController(), *this);
 }
 
-// Stage 3 keeps no persistent state yet; analysis is re-run on demand (stage 4: ARA archiving).
+// The archive holds the hand edits (NoteEdits JSON, playback time); the analysis is run again on demand.
 bool ShizukuDocumentController::doRestoreObjectsFromStream (ARAInputStream& input, const ARARestoreObjectsFilter*) noexcept
 {
-    return ! input.failed();
+    const auto text = input.readEntireStreamAsString();
+    if (input.failed())
+        return false;
+    try
+    {
+        noteEditHistory.reset (text.trim().isEmpty() ? NoteEditDocument {} : parseNoteEdits (text.toStdString()));
+    }
+    catch (const std::exception& error)
+    {
+        araDiagnostic ("could not read the saved hand edits: " + String (error.what()));
+        noteEditHistory.reset ({});
+    }
+    startRender();
+    return true;
 }
 
-bool ShizukuDocumentController::doStoreObjectsToStream (ARAOutputStream&, const ARAStoreObjectsFilter*) noexcept
+bool ShizukuDocumentController::doStoreObjectsToStream (ARAOutputStream& output, const ARAStoreObjectsFilter*) noexcept
 {
-    return true;
+    if (! hasNoteEdits (getNoteEdits()))
+        return true;
+    return output.writeText (String::fromUTF8 (toJson (getNoteEdits()).c_str()), false, false, nullptr);
 }
 
 } // namespace shizuku

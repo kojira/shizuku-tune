@@ -114,38 +114,15 @@ PreparedCorrection prepareCorrection (const std::string& vocalPath, const std::s
     return prepared;
 }
 
-void retarget (const PreparedCorrection& prepared, std::vector<NoteWithKey>& notes)
-{
-    const auto& analysis = prepared.analysis;
-    for (auto& entry : notes)
-    {
-        const auto aligned = entry.alignedReferenceNote;
-        const auto note = entry.note;
-        entry = NoteWithKey {};
-        entry.note = note;
-        entry.alignedReferenceNote = aligned;
-        entry.keyAtNote = keyAtTime (analysis.key, 0.5 * (note.startSeconds + note.endSeconds));
-        entry.nearestScaleMidi = analysis.hasAccompaniment ? nearestScaleMidiNote (entry.keyAtNote, note.centreMidi) : note.nearestMidi;
-    }
-    if (prepared.candidates.empty())
-        return;
-    auto selection = prepared.selection;
-    assignNotesToSegments (selection, notes);
-    applySelectedReferences (notes, prepared.candidates, selection, prepared.selectionSettings);
-    measureReach (notes, analysis.pitch);
-}
-
 EditedAnalysis applyEdits (const PreparedCorrection& prepared, const NoteEditDocument& document)
 {
+    auto notes = applyNoteEdits (prepared.analysis, document, prepared.candidates, prepared.selection, prepared.selectionSettings);
     EditedAnalysis edited;
     edited.analysis = prepared.analysis;
-    if (! document.structure.empty())
-    {
-        auto notes = applyNoteStructure (prepared.analysis, prepared.analysis.notes, document.structure, {}, &edited.unmatchedStructure);
-        retarget (prepared, notes);
-        edited.analysis.notes = std::move (notes);
-    }
-    edited.overrides = resolveNoteEdits (edited.analysis.notes, document.edits, {}, &edited.unmatchedEdits);
+    edited.analysis.notes = std::move (notes.notes);
+    edited.overrides = std::move (notes.overrides);
+    edited.unmatchedStructure = std::move (notes.unmatchedStructure);
+    edited.unmatchedEdits = std::move (notes.unmatchedEdits);
     return edited;
 }
 

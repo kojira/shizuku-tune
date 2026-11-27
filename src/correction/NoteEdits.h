@@ -1,6 +1,7 @@
 #pragma once
 
 #include "PitchCorrection.h"
+#include "ReferenceSelection.h"
 
 #include <string>
 #include <vector>
@@ -100,5 +101,20 @@ std::vector<NoteWithKey> applyNoteStructure (const SongAnalysis& analysis, const
 // unmatched (optional) receives the indices of edits that found no note.
 std::vector<NoteOverride> resolveNoteEdits (const std::vector<NoteWithKey>& notes, const std::vector<NoteEdit>& edits,
                                             const NoteEditMatchSettings& settings = {}, std::vector<size_t>* unmatched = nullptr);
+
+// The document with every time moved by offsetSeconds (e.g. from host timeline seconds to analysis time).
+NoteEditDocument shiftNoteEdits (const NoteEditDocument& document, double offsetSeconds);
+
+// Notes with the hand edits applied: the document's splits / merges (applyNoteStructure, then the targets set
+// again with retargetNotes from candidates / selection; no candidates: scale targets) and the per-note overrides
+// (resolveNoteEdits) on the resulting notes. Without structure edits the notes are analysis.notes unchanged.
+struct EditedNotes
+{
+    std::vector<NoteWithKey> notes;
+    std::vector<NoteOverride> overrides; // parallel to notes
+    std::vector<size_t> unmatchedStructure, unmatchedEdits;
+};
+EditedNotes applyNoteEdits (const SongAnalysis& analysis, const NoteEditDocument& document, const std::vector<ReferenceCandidate>& candidates,
+                            const ReferenceSelection& selection, const ReferenceSelectionSettings& selectionSettings);
 
 } // namespace shizuku

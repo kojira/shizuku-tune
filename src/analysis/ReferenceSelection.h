@@ -150,6 +150,12 @@ NoteAlignmentStats alignNotesToReferences (SongAnalysis& analysis, const std::ve
 // after the notes were changed (alignment, hand splits / merges).
 void assignNotesToSegments (ReferenceSelection& selection, const std::vector<NoteWithKey>& notes);
 
+// Sets the targets of notes that were changed after the selection (e.g. analysis.notes after hand splits / merges)
+// as the first pass did: scale targets from analysis' key, then (with candidates) the chosen references of
+// selection (phrase note ranges recomputed) and the reach. The notes' alignedReferenceNote is kept.
+void retargetNotes (const SongAnalysis& analysis, std::vector<NoteWithKey>& notes, const std::vector<ReferenceCandidate>& candidates,
+                    const ReferenceSelection& selection, const ReferenceSelectionSettings& settings);
+
 struct ReachSettings
 {
     double smoothSeconds = 0.16;       // vibrato-free line, as for the alignment

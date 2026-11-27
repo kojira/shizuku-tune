@@ -37,7 +37,9 @@ struct CapturePlayback
 // when the transport stops, the take is analysed and corrected in the background with the same code as the ARA
 // mode (analyseSong, ReferenceSet, planCorrection, renderCorrection). Afterwards processBlock outputs the corrected
 // vocal at the playhead position where it differs from the input, and the input everywhere else (no latency;
-// identical in offline bounces). Captures are kept in <root>/<id>/ (root: ~/Library/Application Support/
+// identical in offline bounces). Hand edits (NoteEdits.h, timeline seconds) re-render only the spans around the
+// edited notes; they are kept in <root>/<id>/edits.json and in the plug-in state, and stay when capturing again
+// (found again by time). Captures are kept in <root>/<id>/ (root: ~/Library/Application Support/
 // ShizukuTune/captures on macOS, %APPDATA%/ShizukuTune/captures on Windows, or $SHIZUKU_TUNE_CAPTURE_DIR); the
 // plug-in state holds only the id and the settings.
 // $SHIZUKU_TUNE_CAPTURE_ARM_ON_START=1 arms a new instance as soon as the host has prepared it (for host tools
@@ -73,7 +75,7 @@ public:
     juce::String getCaptureId() const { return captureId; }
     bool sampleRateMismatch() const noexcept;
 
-    // Plug-in state: id + settings. restoreState loads the saved capture in the background.
+    // Plug-in state: id + settings + hand edits. restoreState loads the saved capture in the background.
     juce::ValueTree saveState() const;
     void restoreState (const juce::ValueTree& tree);
 
@@ -97,14 +99,22 @@ public:
     std::shared_ptr<const TrackAnalysisResult> getLatestResult() const override { return latestResult; }
     std::shared_ptr<const CorrectionCurve> getLatestCorrection() const override { return latestCorrection; }
     std::shared_ptr<const std::vector<NoteWithKey>> getLatestTargets() const override { return latestTargets; }
+    std::shared_ptr<const CorrectionCurve> getAutomaticCorrection() const override { return automaticCorrection; }
+    std::shared_ptr<const std::vector<NoteWithKey>> getAutomaticTargets() const override { return automaticTargets; }
+    std::shared_ptr<const ReferenceTargets> getReferenceTargets() const override { return referenceTargets; }
+    bool isRendering() const override { return correctionRunning; }
+    bool getAuditionAudio (double startSeconds, double endSeconds, bool corrected, AuditionAudio& audio) const override;
 
 private:
     class Recorder;
     class Job;
 
     void timerCallback() override { update(); }
+    void noteEditsChanged() override;
     void startAnalysis (std::shared_ptr<const CapturedAudio> audio, bool saveAudio);
-    void startCorrection();
+    void startCorrection(); // targets and automatic correction from the settings / references, then startRender
+    void startRender();     // the hand edits on top; renders only what changed since the last render
+    void writeNoteEdits() const;
     void publishPlayback (std::shared_ptr<const CapturePlayback> playback);
     void writeCaptureInfo() const;
     juce::File captureDirectory() const;
@@ -126,7 +136,7 @@ private:
     std::vector<std::unique_ptr<Job>> jobs;
     int generation = 0; // results of jobs started for an older capture are ignored
     bool correctionRunning = false, correctionPending = false;
-    bool restoredRenderValid = false; // the loaded corrected.wav matches the settings (no render needed)
+    bool restoredRenderValid = false; // the loaded corrected.wav matches the settings and edits (no render needed)
     juce::var renderedWith;
     bool armedFromEnvironment = false;           // settings and references of the published corrected vocal
     juce::String captureId;
@@ -138,6 +148,9 @@ private:
     std::shared_ptr<const TrackAnalysisResult> latestResult;
     std::shared_ptr<const CorrectionCurve> latestCorrection;
     std::shared_ptr<const std::vector<NoteWithKey>> latestTargets;
+    std::shared_ptr<const CorrectionCurve> automaticCorrection;
+    std::shared_ptr<const std::vector<NoteWithKey>> automaticTargets;
+    std::shared_ptr<const LayeredRender> latestRender; // of the published corrected vocal (reused for the next edit)
     juce::String detailText; // last analysis / correction message
     juce::uint32 lastCaptureActivityMs = 0;
     juce::int64 lastCapturedSamples = 0;
