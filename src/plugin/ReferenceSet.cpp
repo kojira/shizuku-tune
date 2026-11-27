@@ -11,7 +11,7 @@ String ReferenceSet::add (const File& file)
     {
         auto melody = std::make_shared<ReferenceMelody> (loadReference (file.getFullPathName().toStdString()));
         if (melody->notes.empty())
-            return "The reference melody has no notes.";
+            return String::fromUTF8 (u8"正解のメロディーに音がありません。");
         melodies.push_back (std::move (melody));
         alignments.emplace_back();
         paths.add (file.getFullPathName());
@@ -89,6 +89,10 @@ ReferenceTargets ReferenceSet::applyTo (const TrackAnalysisResult& base, int cho
             }
         result.candidates.push_back (info);
     }
+    result.referencesApplied = choice != referenceNone;
+    result.referenceCandidates = candidates;
+    result.selection = std::move (selection);
+    result.selectionSettings = selectionSettings;
     return result;
 }
 
