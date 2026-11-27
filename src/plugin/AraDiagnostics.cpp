@@ -1,9 +1,14 @@
 #include "AraDiagnostics.h"
 
-#include <unistd.h>
 #include <atomic>
 #include <map>
 #include <mutex>
+
+#if JUCE_WINDOWS
+ #include <process.h>
+#else
+ #include <unistd.h>
+#endif
 
 namespace shizuku
 {
@@ -15,6 +20,25 @@ std::mutex& lock()
     static std::mutex m;
     return m;
 }
+int processId()
+{
+   #if JUCE_WINDOWS
+    return ::_getpid();
+   #else
+    return (int) ::getpid();
+   #endif
+}
+
+// macOS: ~/Library/Logs/ShizukuTune; elsewhere: <user application data>/ShizukuTune/logs (%APPDATA% on Windows).
+juce::File logDirectory()
+{
+   #if JUCE_MAC
+    return juce::File::getSpecialLocation (juce::File::userHomeDirectory).getChildFile ("Library/Logs/ShizukuTune");
+   #else
+    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory).getChildFile ("ShizukuTune/logs");
+   #endif
+}
+
 std::map<std::string, int>& counters()
 {
     static std::map<std::string, int> c;
@@ -24,9 +48,9 @@ std::map<std::string, int>& counters()
 
 void araDiagnostic (const juce::String& event)
 {
-    const auto dir = juce::File::getSpecialLocation (juce::File::userHomeDirectory).getChildFile ("Library/Logs/ShizukuTune");
+    const auto dir = logDirectory();
     dir.createDirectory();
-    const auto line = juce::Time::getCurrentTime().toISO8601 (true) + " pid " + juce::String ((int) ::getpid())
+    const auto line = juce::Time::getCurrentTime().toISO8601 (true) + " pid " + juce::String (processId())
                       + " " + juce::File::getSpecialLocation (juce::File::hostApplicationPath).getFileName() + ": " + event + "\n";
     std::scoped_lock guard (lock());
     dir.getChildFile ("ara.log").appendText (line, false, false, "\n");

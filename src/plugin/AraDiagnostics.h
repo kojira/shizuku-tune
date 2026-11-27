@@ -6,7 +6,8 @@ namespace shizuku
 {
 
 // Small diagnostic trail for "does the host use us as ARA?": counts of the ARA entry points the host
-// called, plus one line per event in ~/Library/Logs/ShizukuTune/ara.log (timestamped, process id).
+// called, plus one line per event in ara.log (timestamped, process id) in ~/Library/Logs/ShizukuTune on macOS and
+// %APPDATA%/ShizukuTune/logs on Windows.
 void araDiagnostic (const juce::String& event);
 void araNote (const char* counter); // factoryRequested / documentControllerCreated / bound / editorView
 juce::String araDiagnosticSummary();

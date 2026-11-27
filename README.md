@@ -2,14 +2,14 @@
 
 [日本語](#日本語) | [English](#english)
 
-Analysis-based, natural-sounding pitch correction for vocals, as an Audio Unit (AUv2) for macOS (Apple silicon and Intel).
+Analysis-based, natural-sounding pitch correction for vocals, as an Audio Unit (AUv2) and VST3 for macOS (Apple silicon and Intel) and a VST3 for Windows (x64 and ARM64).
 It analyses the whole take first, then moves each note only as far as needed, keeping vibrato, scoops and the singer's phrasing.
 
 ---
 
 ## 日本語
 
-歌のテイクを最初に通しで解析してから補正する、自然さ重視のピッチ補正プラグインです（macOS 用 Audio Unit）。
+歌のテイクを最初に通しで解析してから補正する、自然さ重視のピッチ補正プラグインです（macOS 用 Audio Unit / VST3、Windows 用 VST3）。
 
 ### できること
 
@@ -34,6 +34,15 @@ Apple シリコンの Logic Pro はプラグインを別プロセスで動かす
 
 Studio One や REAPER など ARA に対応したホストでは、ARA 版（Shizuku Tune (ARA)）として差すと、再生せずにトラック全体を解析できます。
 
+### Windows（VST3）
+
+1. GitHub の [Actions](https://github.com/kojira/shizuku-tune/actions) で最新の成功した build を開き、成果物 `ShizukuTune-Windows-x64-VST3`（ARM64 ネイティブの DAW なら `ShizukuTune-Windows-arm64-VST3`）をダウンロードして展開します。
+2. 中の `Shizuku Tune.vst3` を `C:\Program Files\Common Files\VST3` に置き、DAW でプラグインを再スキャンします。
+3. 使い方は上の取り込み方式と同じです: 歌のトラックに差し、伴奏をサイドチェーンに入れて **取り込み** を押し、1 回再生します。REAPER の例: 伴奏トラックのルーティング（ROUTE）で歌のトラックへセンドを作り、送り先を 3/4 チャンネルにします（歌のトラックのチャンネル数は 4 に）。プラグインの入出力ピン設定で 3/4 をサイドチェーン入力につなぎます。
+4. ARA に対応した DAW（REAPER は 6.x 以降）では、FX を追加する時に ARA の方（Shizuku Tune (ARA)）を選ぶと再生せずに解析できます。
+
+取り込みは `%APPDATA%\ShizukuTune\captures\` に保存されます。Windows の DAW（REAPER を含む）での動作は未確認です。
+
 ### ビルド
 
 ```sh
@@ -45,7 +54,9 @@ cp -R "build/ShizukuTune_artefacts/Release/AU/Shizuku Tune.component" ~/Library/
 auval -v aufx Shzt Kjra
 ```
 
-必要なもの: macOS、Xcode、CMake 3.22 以上、Ninja。arm64 + x86_64 の両方入りでビルドされます。
+必要なもの: macOS、Xcode、CMake 3.22 以上、Ninja。arm64 + x86_64 の両方入りでビルドされます。VST3 は `--target ShizukuTune_VST3` で `build/ShizukuTune_artefacts/Release/VST3/Shizuku Tune.vst3` にできます。
+
+Windows では Visual Studio 2022（C++）の開発者コマンドプロンプトで同じ `cmake` を実行し、`--target ShizukuTune_VST3` でビルドします。
 
 ---
 
@@ -74,6 +85,15 @@ Captures are stored in `~/Library/Application Support/ShizukuTune/captures/`; th
 
 In ARA hosts (Studio One, REAPER, …) insert **Shizuku Tune (ARA)** to analyse whole tracks without playing them.
 
+### Windows (VST3)
+
+1. Open the latest successful `build` run under [Actions](https://github.com/kojira/shizuku-tune/actions) and download the `ShizukuTune-Windows-x64-VST3` artifact (`ShizukuTune-Windows-arm64-VST3` for ARM64-native DAWs).
+2. Put `Shizuku Tune.vst3` into `C:\Program Files\Common Files\VST3` and rescan plug-ins in the DAW.
+3. Use it as above: insert it on the vocal track, route the accompaniment to the side chain, press **取り込み** (Capture) and play once. In REAPER, for example: in the accompaniment track's routing (ROUTE), add a send to the vocal track into channels 3/4 (set the vocal track to 4 channels), and connect 3/4 to the side-chain input in the plug-in's pin connector.
+4. In ARA-capable DAWs (REAPER 6.x and later), choose the ARA variant (Shizuku Tune (ARA)) when adding the FX to analyse without playing.
+
+Captures are stored in `%APPDATA%\ShizukuTune\captures\`. Operation in Windows DAWs (including REAPER) is not yet verified.
+
 ### Building
 
 ```sh
@@ -85,7 +105,9 @@ cp -R "build/ShizukuTune_artefacts/Release/AU/Shizuku Tune.component" ~/Library/
 auval -v aufx Shzt Kjra
 ```
 
-Requires macOS, Xcode, CMake ≥ 3.22 and Ninja. The component is built for arm64 and x86_64.
+Requires macOS, Xcode, CMake ≥ 3.22 and Ninja. The component is built for arm64 and x86_64. `--target ShizukuTune_VST3` builds `build/ShizukuTune_artefacts/Release/VST3/Shizuku Tune.vst3`.
+
+On Windows, run the same `cmake` commands from a Visual Studio 2022 (C++) developer prompt and build `--target ShizukuTune_VST3`.
 
 ### Command-line tools and tests
 
@@ -111,7 +133,7 @@ cmake --build build-analysis && (cd build-analysis && ctest --output-on-failure)
 
 - `src/analysis/` — JUCE-free analysis: key detection, pYIN pitch tracking, note segmentation, tempo, reference melodies (`.svp` / `.mid` / guide `.wav`) and their per-phrase selection and alignment.
 - `src/correction/` — correction planning (per-note shifts, target pitch curves, connections) and rendering with Signalsmith Stretch; hand edits.
-- `src/plugin/` — the Audio Unit: ARA document controller and playback renderer, capture mode (`CaptureSession`), editor and pitch view.
+- `src/plugin/` — the plug-in (Audio Unit / VST3): ARA document controller and playback renderer, capture mode (`CaptureSession`), editor and pitch view.
 - `tools/`, `tests/` — command-line tools and tests.
 - `external/` — JUCE (submodule, `8.0.17-security`), ARA SDK (`releases/2.3.0`, ARA_API and ARA_Library), Signalsmith Stretch (`1.4.0`) and Linear (`0.6.4`) (submodules).
 

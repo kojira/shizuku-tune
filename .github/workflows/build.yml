@@ -1,0 +1,61 @@
+name: build
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  macos:
+    name: macOS (universal, AU + VST3)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Ninja
+        run: brew install ninja
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ShizukuTune-macOS-universal
+          path: |
+            build/ShizukuTune_artefacts/Release/AU/Shizuku Tune.component
+            build/ShizukuTune_artefacts/Release/VST3/Shizuku Tune.vst3
+
+  windows:
+    name: Windows ${{ matrix.arch }} (VST3)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ShizukuTune-Windows-${{ matrix.arch }}-VST3
+          # The parent folder, so the archive contains the "Shizuku Tune.vst3" bundle folder itself.
+          path: build/ShizukuTune_artefacts/Release/VST3

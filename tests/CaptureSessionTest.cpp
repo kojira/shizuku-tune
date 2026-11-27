@@ -22,7 +22,15 @@
 #include "PitchCorrection.h"
 #include "WavFile.h"
 
-#include <CoreFoundation/CoreFoundation.h>
+#if JUCE_MAC
+ #include <CoreFoundation/CoreFoundation.h>
+#elif JUCE_WINDOWS
+ #ifndef NOMINMAX
+  #define NOMINMAX // keep std::min / std::max usable
+ #endif
+ #include <windows.h>
+ #include <stdlib.h>
+#endif
 
 #include <cstdio>
 #include <cstring>
@@ -35,6 +43,38 @@ namespace
 constexpr double sampleRate = 44100.0;
 constexpr int blockSize = 512;
 int failures = 0;
+
+// Dispatches the JUCE message queue for about the given time (the plug-in builds JUCE without modal loops, so
+// MessageManager::runDispatchLoopUntil is unavailable).
+void runMessageLoop (double seconds)
+{
+   #if JUCE_MAC
+    CFRunLoopRunInMode (kCFRunLoopDefaultMode, seconds, true);
+   #elif JUCE_WINDOWS
+    const auto end = Time::getMillisecondCounterHiRes() + seconds * 1000.0;
+    do
+    {
+        MSG message;
+        while (PeekMessage (&message, nullptr, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage (&message);
+            DispatchMessage (&message);
+        }
+        Thread::sleep (1);
+    } while (Time::getMillisecondCounterHiRes() < end);
+   #else
+    #error "runMessageLoop: unsupported platform"
+   #endif
+}
+
+void setEnvironmentVariable (const char* name, const String& value)
+{
+   #if JUCE_WINDOWS
+    _putenv_s (name, value.toRawUTF8());
+   #else
+    setenv (name, value.toRawUTF8(), 1);
+   #endif
+}
 
 void check (bool condition, const char* what)
 {
@@ -140,7 +180,7 @@ struct Host
         while (Time::getMillisecondCounter() - start < (uint32) timeoutMs)
         {
             session.update();
-            CFRunLoopRunInMode (kCFRunLoopDefaultMode, 0.02, true); // dispatches the JUCE message queue
+            runMessageLoop (0.02);
             if (session.getState() == CaptureSession::State::ready)
                 return true;
         }
@@ -210,7 +250,7 @@ int main (int argc, char** argv)
 
     const auto captureRoot = File::getSpecialLocation (File::tempDirectory).getChildFile ("shizuku-capture-test");
     captureRoot.deleteRecursively();
-    setenv ("SHIZUKU_TUNE_CAPTURE_DIR", captureRoot.getFullPathName().toRawUTF8(), 1);
+    setEnvironmentVariable ("SHIZUKU_TUNE_CAPTURE_DIR", captureRoot.getFullPathName());
 
     const auto song = makeSong();
     const auto length = (int64) song.vocal.size();
@@ -266,7 +306,7 @@ int main (int argc, char** argv)
         if (snapshotPath.isNotEmpty())
         {
             std::unique_ptr<AudioProcessorEditor> editor (host.processor->createEditor());
-            CFRunLoopRunInMode (kCFRunLoopDefaultMode, 0.1, true);
+            runMessageLoop (0.1);
             const auto image = editor->createComponentSnapshot (editor->getLocalBounds());
             FileOutputStream stream { File (snapshotPath) };
             stream.setPosition (0);

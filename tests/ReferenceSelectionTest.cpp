@@ -16,6 +16,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <string>
 
@@ -90,7 +91,7 @@ NoteWithKey sung (double start, double end, double centreMidi, int scaleTarget)
 int main()
 {
     std::printf ("MIDI parts and confidence:\n");
-    const std::string path = "/tmp/shizuku-reference-selection-test.mid";
+    const std::string path = (std::filesystem::temp_directory_path() / "shizuku-reference-selection-test.mid").string();
     {
         // Part "lead (A)": 0-4 s, one note per second; part "lead (B)": 10-14 s. Velocity = confidence.
         std::vector<MidiNote> a { { 0.0, 1.0, 60, 127 }, { 1.0, 2.0, 62, 127 }, { 2.0, 3.0, 64, 121 }, { 3.0, 4.0, 65, 127 } };

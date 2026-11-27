@@ -350,7 +350,11 @@ File CaptureSession::getCaptureRoot()
     const auto overridden = SystemStats::getEnvironmentVariable ("SHIZUKU_TUNE_CAPTURE_DIR", {});
     if (overridden.isNotEmpty())
         return File (overridden);
+   #if JUCE_MAC
     return File::getSpecialLocation (File::userApplicationDataDirectory).getChildFile ("Application Support/ShizukuTune/captures");
+   #else
+    return File::getSpecialLocation (File::userApplicationDataDirectory).getChildFile ("ShizukuTune/captures");
+   #endif
 }
 
 File CaptureSession::captureDirectory() const
