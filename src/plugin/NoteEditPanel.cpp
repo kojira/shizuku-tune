@@ -29,6 +29,8 @@ NoteEditPanel::NoteEditPanel (PitchLineView& viewIn) : view (viewIn)
         addAndMakeVisible (component);
 
     infoLabel.setJustificationType (Justification::topLeft);
+    infoLabel.setFont (FontOptions (13.0f));
+    infoLabel.setMinimumHorizontalScale (0.8f);
     infoLabel.setColour (Label::textColourId, Colours::white.withAlpha (0.9f));
     pitchLabel.setText (String::fromUTF8 (u8"高さ"), dontSendNotification);
     pitchEntry.setTextToShowWhenEmpty ("D5 +3", Colours::grey);
@@ -122,9 +124,9 @@ String NoteEditPanel::automaticText (size_t note) const
     const auto& sung = (*notes)[(size_t) best].note;
     if (! decision.corrected || std::abs (decision.shiftSemitones) < 0.0005)
         return String::fromUTF8 (u8"補正しない（") + String (midiNoteName ((int) std::lround (decision.targetMidi))) + String::fromUTF8 (u8" から ")
-               + String (std::abs (decision.deviationCents), 0) + String::fromUTF8 (u8" セント）");
+               + String (roundToInt (std::abs (decision.deviationCents))) + String::fromUTF8 (u8" セント）");
     return pitchText (sung.centreMidi + decision.shiftSemitones) + String::fromUTF8 (u8"（") + String (midiNoteName ((int) std::lround (decision.targetMidi)))
-           + String::fromUTF8 (u8"、") + (decision.shiftSemitones > 0 ? "+" : "") + String (decision.shiftSemitones * 100.0, 0) + String::fromUTF8 (u8" セント動かす）");
+           + String::fromUTF8 (u8"、") + (decision.shiftSemitones > 0 ? "+" : "") + String (roundToInt (decision.shiftSemitones * 100.0)) + String::fromUTF8 (u8" セント）");
 }
 
 void NoteEditPanel::refresh()
@@ -294,14 +296,14 @@ void NoteEditPanel::paint (Graphics& g)
 void NoteEditPanel::resized()
 {
     auto area = getLocalBounds().reduced (6, 4);
-    auto right = area.removeFromRight (jmin (640, area.getWidth() * 2 / 3));
+    auto right = area.removeFromRight (jmin (560, area.getWidth() * 3 / 5));
     infoLabel.setBounds (area);
     const int rowHeight = 24;
     auto row1 = right.removeFromTop (rowHeight);
-    pitchLabel.setBounds (row1.removeFromLeft (36));
+    pitchLabel.setBounds (row1.removeFromLeft (32));
     pitchEntry.setBounds (row1.removeFromLeft (90));
     row1.removeFromLeft (4);
-    applyPitchButton.setBounds (row1.removeFromLeft (110));
+    applyPitchButton.setBounds (row1.removeFromLeft (104));
     row1.removeFromLeft (4);
     centDownButton.setBounds (row1.removeFromLeft (76));
     row1.removeFromLeft (2);

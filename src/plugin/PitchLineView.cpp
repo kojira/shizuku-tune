@@ -247,6 +247,12 @@ PitchLineView::NoteBox PitchLineView::boxFor (size_t i) const
     return { x0, jmax (xForTime (span.getEnd()), x0 + 3.0f), yForMidi (midi), jlimit (4.0f, 10.0f, semitonePixels() * 0.45f), midi };
 }
 
+Point<float> PitchLineView::getNoteBoxCentre (size_t note) const
+{
+    const auto box = boxFor (note);
+    return { 0.5f * (box.x0 + box.x1), box.y };
+}
+
 long PitchLineView::noteAt (Point<float> position) const
 {
     long best = -1;
@@ -323,6 +329,8 @@ void PitchLineView::mouseDrag (const MouseEvent& event)
 
 void PitchLineView::mouseUp (const MouseEvent& event)
 {
+    if (gesture == Gesture::noteDrag && gestureMoved)
+        mouseDrag (event); // the semitone offset where the button was released
     const auto finished = gesture;
     gesture = Gesture::none;
     if (finished == Gesture::noteDrag)
@@ -628,15 +636,19 @@ void PitchLineView::paint (Graphics& g)
 
     // Legend.
     g.setFont (FontOptions (12.0f));
-    auto legend = Rectangle<float> (bounds.getRight() - 520.0f, bounds.getBottom() - 18.0f, 516.0f, 16.0f);
+    float legendWidth = 0.0f;
+    const auto widthOf = [] (const char* text) { return 12.0f * (float) String::fromUTF8 (text).length() + 10.0f; };
     const std::pair<Colour, const char*> items[] = { { Colour (0xff7fd6ff), u8"歌った音程" }, { Colour (0xffff6fb0), u8"補正後" },
                                                      { Colour (0xffffc04d), u8"キーの目標" }, { Colour (0xff6ee07a), u8"正解の目標" },
                                                      { Colour (0xffffe9a8), u8"手直し" }, { Colour (0xffb07cff), u8"正解のメロディー" },
                                                      { Colour (0xffff4d4d), u8"正解が不確か" } };
+    for (const auto& item : items)
+        legendWidth += widthOf (item.second);
+    auto legend = Rectangle<float> (bounds.getRight() - legendWidth - 4.0f, bounds.getBottom() - 18.0f, legendWidth, 16.0f);
     for (const auto& [colour, text] : items)
     {
         g.setColour (colour);
-        g.drawText (String::fromUTF8 (text), legend.removeFromLeft (74.0f), Justification::centredLeft);
+        g.drawText (String::fromUTF8 (text), legend.removeFromLeft (widthOf (text)), Justification::centredLeft);
     }
 
     if (busyText.isNotEmpty())

@@ -74,6 +74,9 @@ public:
     // Timeline span of a note.
     juce::Range<double> noteSpan (size_t note) const;
     size_t numNotes() const noexcept { return targets != nullptr ? targets->size() : 0; }
+    // Where a note's box is drawn (centre, component coordinates) and the height of a semitone in pixels.
+    juce::Point<float> getNoteBoxCentre (size_t note) const;
+    float getSemitoneHeight() const { return semitonePixels(); }
 
     std::function<void()> onSelectionChanged;
     std::function<void (size_t note)> onNoteClicked;                 // a click on a note (after the selection changed)

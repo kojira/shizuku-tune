@@ -34,7 +34,7 @@ private:
     std::vector<NoteEditDocument> undoStack, redoStack;
 };
 
-// Same edits (JSON text, ignoring "created" / "version").
+// Same edits (JSON text, ignoring "file", "baseVersion", "created" and "version").
 bool sameNoteEdits (const NoteEditDocument& a, const NoteEditDocument& b);
 bool hasNoteEdits (const NoteEditDocument& document);
 
@@ -77,8 +77,8 @@ struct NoteSpan
     double startSeconds = 0.0, endSeconds = 0.0;
 };
 
-// Edit operations: each returns the new document (the input with the change appended). Earlier edits of the
-// same note (middle inside the note) are replaced.
+// Edit operations: each returns the new document (the input with the change appended; times rounded to whole
+// milliseconds as in the JSON file). Earlier edits of the same note (middle inside the note) are replaced.
 NoteEditDocument withNoteTargets (const NoteEditDocument& document, const std::vector<NoteSpan>& notes, const std::vector<double>& targetMidi);
 NoteEditDocument withNoteMode (const NoteEditDocument& document, const std::vector<NoteSpan>& notes, NoteEditMode mode);
 NoteEditDocument withSplit (const NoteEditDocument& document, double timeSeconds);

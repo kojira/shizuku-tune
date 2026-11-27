@@ -12,6 +12,13 @@ using namespace juce;
 
 namespace
 {
+// Times are kept in whole milliseconds, the precision of the JSON file, so a saved document gives exactly the
+// same notes as the one in memory.
+double roundToMillisecond (double seconds)
+{
+    return std::round (seconds * 1000.0) / 1000.0;
+}
+
 std::string nowText()
 {
     return Time::getCurrentTime().toISO8601 (true).toStdString();
@@ -74,6 +81,7 @@ bool sameNoteEdits (const NoteEditDocument& a, const NoteEditDocument& b)
 {
     const auto strip = [] (NoteEditDocument d)
     {
+        d.file = d.baseVersion = {};
         for (auto& e : d.edits)
             e.created = e.version = {};
         for (auto& e : d.structure)
@@ -143,8 +151,8 @@ NoteEditDocument withNoteTargets (const NoteEditDocument& document, const std::v
     for (size_t i = 0; i < notes.size() && i < targetMidi.size(); ++i)
     {
         NoteEdit edit;
-        edit.startSeconds = notes[i].startSeconds;
-        edit.endSeconds = notes[i].endSeconds;
+        edit.startSeconds = roundToMillisecond (notes[i].startSeconds);
+        edit.endSeconds = roundToMillisecond (notes[i].endSeconds);
         edit.mode = NoteEditMode::target;
         edit.targetMidi = roundToCent (targetMidi[i]);
         edit.created = created;
@@ -163,8 +171,8 @@ NoteEditDocument withNoteMode (const NoteEditDocument& document, const std::vect
     for (const auto& note : notes)
     {
         NoteEdit edit;
-        edit.startSeconds = note.startSeconds;
-        edit.endSeconds = note.endSeconds;
+        edit.startSeconds = roundToMillisecond (note.startSeconds);
+        edit.endSeconds = roundToMillisecond (note.endSeconds);
         edit.mode = mode;
         edit.created = created;
         next.edits.push_back (edit);
@@ -177,7 +185,7 @@ NoteEditDocument withSplit (const NoteEditDocument& document, double timeSeconds
     auto next = document;
     NoteStructureEdit edit;
     edit.op = NoteStructureEdit::Op::split;
-    edit.timeSeconds = timeSeconds;
+    edit.timeSeconds = roundToMillisecond (timeSeconds);
     edit.created = nowText();
     next.structure.push_back (edit);
     return next;
@@ -188,8 +196,8 @@ NoteEditDocument withMerge (const NoteEditDocument& document, const NoteSpan& fi
     auto next = document;
     NoteStructureEdit edit;
     edit.op = NoteStructureEdit::Op::merge;
-    edit.startSeconds = std::min (first.startSeconds, last.startSeconds);
-    edit.endSeconds = std::max (first.endSeconds, last.endSeconds);
+    edit.startSeconds = roundToMillisecond (std::min (first.startSeconds, last.startSeconds));
+    edit.endSeconds = roundToMillisecond (std::max (first.endSeconds, last.endSeconds));
     edit.created = nowText();
     next.structure.push_back (edit);
     return next;

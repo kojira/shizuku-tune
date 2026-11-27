@@ -9,12 +9,22 @@
 // - a jump back (the second pass over a range overwrites the first), a capture starting at a non-zero position,
 //   no side chain, a sample-rate change (no correction played) and getStateInformation / setStateInformation
 //   (a new instance plays the same corrected vocal without capturing again).
-// Optional: --snapshot <file.png> draws the editor (capture mode, after the capture) to a PNG.
+// - hand edits through the plug-in (a target, keep, a split, a merge, and two notes picked with Cmd + click and
+//   dragged up together in the editor's pitch view): the output equals shizuku-correct --edits (automatic render
+//   with the edited spans rendered again), is bit-identical to the automatic correction outside the edited spans,
+//   one undo takes back the whole drag, and the edits survive getStateInformation / setStateInformation and a new
+//   capture (found again by time);
+// - previews: with the transport stopped, clicking a note in the editor adds that note's corrected audio to the
+//   output; the preview stops when the host starts playing; processBlock does not allocate.
+// Optional: --snapshot <file.png> draws the editor (capture mode, after the capture) to a PNG;
+// --snapshot-edit <file.png> draws it with the edits, a multi-note selection and the playhead (and <file>-note.png
+// with one note selected).
 // Optional: --write <dir> writes vocal.wav / accompaniment.wav / plugin_out.wav for a comparison with the
 // shizuku-correct command-line tool (see tools/compare_capture.sh).
 // Exits non-zero when any check fails.
 
 #include "../src/plugin/CaptureSession.h"
+#include "../src/plugin/ShizukuPluginEditor.h"
 #include "../src/plugin/ShizukuPluginProcessor.h"
 #include "../tools/CorrectionSetup.h"
 #include "../tools/SyntheticSignals.h"
@@ -32,8 +42,39 @@
  #include <stdlib.h>
 #endif
 
+#include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <new>
+
+// Allocation counter for the audio-thread checks (counts only while countAllocations is set on this thread).
+namespace
+{
+thread_local bool countAllocations = false;
+std::atomic<int> allocationsCounted { 0 };
+} // namespace
+
+void* operator new (std::size_t size)
+{
+    if (countAllocations)
+        ++allocationsCounted;
+    if (void* p = std::malloc (size == 0 ? 1 : size))
+        return p;
+    throw std::bad_alloc();
+}
+void* operator new[] (std::size_t size)
+{
+    if (countAllocations)
+        ++allocationsCounted;
+    if (void* p = std::malloc (size == 0 ? 1 : size))
+        return p;
+    throw std::bad_alloc();
+}
+void operator delete (void* p) noexcept { std::free (p); }
+void operator delete[] (void* p) noexcept { std::free (p); }
+void operator delete (void* p, std::size_t) noexcept { std::free (p); }
+void operator delete[] (void* p, std::size_t) noexcept { std::free (p); }
 
 using namespace shizuku;
 using namespace juce;
@@ -131,13 +172,13 @@ struct Host
     ~Host() { processor->releaseResources(); }
 
     // Plays timeline samples [from, to) and returns the main output (channel 0) for that range.
-    std::vector<float> play (const Song& song, int64 from, int64 to)
+    std::vector<float> play (const Song& song, int64 from, int64 to, bool playing = true)
     {
         std::vector<float> output;
         const int numChannels = processor->getTotalNumInputChannels();
         AudioBuffer<float> buffer (jmax (numChannels, processor->getTotalNumOutputChannels()), blockSize);
         MidiBuffer midi;
-        playHead.playing = true;
+        playHead.playing = playing;
         for (auto position = from; position < to; position += blockSize)
         {
             const int n = (int) jmin<int64> (blockSize, to - position);
@@ -156,7 +197,9 @@ struct Host
                 }
             }
             playHead.timeInSamples = position;
+            countAllocations = true;
             processor->processBlock (buffer, midi);
+            countAllocations = false;
             output.insert (output.end(), buffer.getReadPointer (0), buffer.getReadPointer (0) + n);
         }
         return output;
@@ -236,16 +279,95 @@ int bestLag (const std::vector<float>& output, const std::vector<float>& expecte
 }
 } // namespace
 
+// What shizuku-correct --edits does: the automatic render, with the spans around the edited notes rendered again.
+struct EditedExpectation
+{
+    std::vector<float> output;
+    std::vector<TimeSpan> spans;
+};
+
+EditedExpectation expectedEditedCorrection (const Song& song, const NoteEditDocument& edits)
+{
+    const auto directory = File::getSpecialLocation (File::tempDirectory).getChildFile ("shizuku-capture-test-edits");
+    directory.createDirectory();
+    const auto path = [&] (const char* name) { return directory.getChildFile (name).getFullPathName().toStdString(); };
+    writeWavFloat32 (path ("vocal.wav"), { song.vocal, song.vocal }, sampleRate);
+    writeWavFloat32 (path ("accompaniment.wav"), { song.accompaniment }, sampleRate);
+    directory.getChildFile ("edits.json").replaceWithText (String::fromUTF8 (toJson (edits).c_str()));
+    const auto prepared = tools::prepareCorrection (path ("vocal.wav"), path ("accompaniment.wav"), {}, -2, -1.0, false);
+    const auto document = loadNoteEdits (path ("edits.json")); // through the file, as shizuku-correct --edits reads it
+    const auto edited = tools::applyEdits (prepared, document);
+    const CorrectionSettings settings;
+    const double hint = medianVoicedFrequency (prepared.analysis.pitch);
+    const auto automaticCurve = planCorrection (prepared.analysis, settings);
+    const auto automatic = renderCorrection (prepared.vocal.channels, sampleRate, automaticCurve, 0.0, hint);
+    const auto curve = planCorrection (edited.analysis, settings, edited.overrides);
+    auto render = renderEditedSpans (prepared.vocal.channels, sampleRate, automaticCurve, automatic, curve, 0.0, hint);
+    directory.deleteRecursively();
+    return { render.output[0], render.spans };
+}
+
+// Largest difference outside the given spans (timeline = analysis time).
+double maxDifferenceOutside (const std::vector<float>& a, const std::vector<float>& b, const std::vector<TimeSpan>& spans)
+{
+    double worst = 0.0;
+    for (size_t i = 0; i < a.size() && i < b.size(); ++i)
+    {
+        const double t = (double) i / sampleRate;
+        if (std::any_of (spans.begin(), spans.end(), [t] (const TimeSpan& span) { return t >= span.startSeconds - 0.001 && t <= span.endSeconds + 0.001; }))
+            continue;
+        worst = std::max (worst, (double) std::abs (a[i] - b[i]));
+    }
+    return worst;
+}
+
+MouseEvent mouseEventAt (Component& component, juce::Point<float> position, juce::Point<float> downPosition, ModifierKeys mods, bool dragged)
+{
+    const auto now = Time::getCurrentTime();
+    return MouseEvent (Desktop::getInstance().getMainMouseSource(), position, mods, MouseInputSource::defaultPressure, 0.0f, 0.0f, 0.0f, 0.0f,
+                       &component, &component, now, downPosition, now, 1, dragged);
+}
+
+void clickNote (PitchLineView& view, size_t note, ModifierKeys mods = {})
+{
+    const auto at = view.getNoteBoxCentre (note);
+    view.mouseDown (mouseEventAt (view, at, at, mods, false));
+    view.mouseUp (mouseEventAt (view, at, at, mods, false));
+}
+
+void dragNote (PitchLineView& view, size_t note, int semitones)
+{
+    const auto at = view.getNoteBoxCentre (note);
+    view.mouseDown (mouseEventAt (view, at, at, {}, false));
+    for (int step = 1; step <= 4; ++step)
+    {
+        const auto to = at.translated (0.0f, -view.getSemitoneHeight() * (float) semitones * (float) step / 4.0f);
+        view.mouseDrag (mouseEventAt (view, to, at, ModifierKeys (ModifierKeys::leftButtonModifier), true));
+    }
+    const auto end = at.translated (0.0f, -view.getSemitoneHeight() * (float) semitones);
+    view.mouseUp (mouseEventAt (view, end, at, {}, true));
+}
+
+double peak (const std::vector<float>& signal)
+{
+    double worst = 0.0;
+    for (const auto value : signal)
+        worst = std::max (worst, (double) std::abs (value));
+    return worst;
+}
+
 int main (int argc, char** argv)
 {
     ScopedJuceInitialiser_GUI juce;
-    String writeDirectory, snapshotPath;
+    String writeDirectory, snapshotPath, editSnapshotPath;
     for (int i = 1; i < argc; ++i)
     {
         if (std::strcmp (argv[i], "--write") == 0 && i + 1 < argc)
             writeDirectory = argv[++i];
         else if (std::strcmp (argv[i], "--snapshot") == 0 && i + 1 < argc)
             snapshotPath = argv[++i];
+        else if (std::strcmp (argv[i], "--snapshot-edit") == 0 && i + 1 < argc)
+            editSnapshotPath = argv[++i];
     }
 
     const auto captureRoot = File::getSpecialLocation (File::tempDirectory).getChildFile ("shizuku-capture-test");
@@ -417,6 +539,167 @@ int main (int argc, char** argv)
         check (maxDifference (output, expectedNoAccompaniment) < 1.0e-6, "output = shizuku-correct (accompaniment '-')");
         const auto before = host.play (shifted, 0, offset);
         check (maxDifferenceToInput (before, shifted.vocal, 0) == 0.0, "input unchanged outside the captured range");
+    }
+
+    std::printf ("pitch entry in the edit panel\n");
+    {
+        double midi = 0.0;
+        check (parsePitchText ("D5 +3", midi) && std::abs (midi - 74.03) < 1.0e-9, "\"D5 +3\" = 74.03");
+        check (parsePitchText (String::fromUTF8 (u8"C#4 −12 セント"), midi) && std::abs (midi - 60.88) < 1.0e-9, "\"C#4 -12 セント\" = 60.88");
+        check (parsePitchText ("Eb4", midi) && std::abs (midi - 63.0) < 1.0e-9, "\"Eb4\" = 63");
+        check (! parsePitchText ("H2", midi) && ! parsePitchText ("D5 x", midi), "unreadable entries rejected");
+        check (pitchText (74.03) == "D5 +3" && pitchText (60.88) == "C#4 -12", "pitch text round trip");
+    }
+
+    std::printf ("hand edits through the plug-in, as shizuku-correct --edits\n");
+    {
+        MemoryBlock editedState;
+        NoteEditDocument edits;
+        EditedExpectation expectedEdited;
+        {
+            Host host (true);
+            auto& session = host.processor->getCaptureSession();
+            session.arm();
+            host.play (song, 0, length);
+            host.stop();
+            host.waitUntilReady();
+            const auto automaticOutput = host.play (song, 0, length);
+            host.stop(); // edited while the host is stopped (clicks and drags preview)
+            const auto notes = session.getLatestTargets();
+            check (notes != nullptr && notes->size() >= 10, "notes to edit");
+            if (notes == nullptr || notes->size() < 10)
+                return 1;
+            const auto span = [&] (size_t i) { return NoteSpan { (*notes)[i].note.startSeconds, (*notes)[i].note.endSeconds }; };
+
+            // Panel operations as the edit panel does them: a target, keep, a split, a merge (one undo step each).
+            session.applyNoteEdits (withNoteTargets (session.getNoteEdits(), { span (2) }, { (*notes)[2].nearestScaleMidi + 1.03 }));
+            session.applyNoteEdits (withNoteMode (session.getNoteEdits(), { span (4) }, NoteEditMode::keep));
+            const auto& longNote = (*notes)[9].note; // 0.9 s
+            session.applyNoteEdits (withSplit (session.getNoteEdits(), 0.5 * (longNote.startSeconds + longNote.endSeconds)));
+            session.applyNoteEdits (withMerge (session.getNoteEdits(), span (6), span (7)));
+            host.waitUntilReady();
+
+            // Two notes picked with Cmd + click in the editor and dragged up 2 semitones together.
+            std::unique_ptr<AudioProcessorEditor> editor (host.processor->createEditor());
+            auto& pluginEditor = dynamic_cast<ShizukuPluginEditor&> (*editor);
+            runMessageLoop (0.1);
+            auto& view = pluginEditor.getPitchLineView();
+            const auto before = session.getNoteEdits();
+            const auto noteA = (size_t) 0, noteB = (size_t) 1;
+            const double targetA = view.currentTargetMidi (noteA), targetB = view.currentTargetMidi (noteB);
+            clickNote (view, noteA);
+            clickNote (view, noteB, ModifierKeys (ModifierKeys::commandModifier));
+            check (view.getSelection() == std::vector<size_t> ({ noteA, noteB }), "Cmd + click adds a note to the selection");
+            dragNote (view, noteA, 2);
+            host.waitUntilReady();
+            runMessageLoop (0.1);
+            check (std::abs (view.currentTargetMidi (noteA) - (targetA + 2.0)) < 0.006 && std::abs (view.currentTargetMidi (noteB) - (targetB + 2.0)) < 0.006,
+                   "dragging one selected note moves every selected note by the same semitones");
+            const auto dragged = session.getNoteEdits();
+            session.undoNoteEdit();
+            check (sameNoteEdits (session.getNoteEdits(), before), "one undo takes back the whole drag");
+            session.redoNoteEdit();
+            check (sameNoteEdits (session.getNoteEdits(), dragged), "redo applies it again");
+            host.waitUntilReady();
+            runMessageLoop (0.1);
+
+            // Shift + click: every note from the previously clicked one.
+            clickNote (view, 3);
+            clickNote (view, 5, ModifierKeys (ModifierKeys::shiftModifier));
+            check (view.getSelection() == std::vector<size_t> ({ 3, 4, 5 }), "Shift + click selects the notes in between");
+
+            edits = session.getNoteEdits();
+            std::printf ("  %zu edits, %zu splits / merges\n", edits.edits.size(), edits.structure.size());
+            expectedEdited = expectedEditedCorrection (song, edits);
+            const auto output = host.play (song, 0, length);
+            std::printf ("  output vs. shizuku-correct --edits: max difference %.3g; edited spans:", maxDifference (output, expectedEdited.output));
+            for (const auto& s : expectedEdited.spans)
+                std::printf (" %.2f-%.2f", s.startSeconds, s.endSeconds);
+            std::printf ("\n");
+            check (maxDifference (output, expectedEdited.output) < 1.0e-6, "output = shizuku-correct --edits");
+            check (maxDifference (output, automaticOutput) > 0.01, "the edits change the output");
+            check (! expectedEdited.spans.empty() && maxDifferenceOutside (output, automaticOutput, expectedEdited.spans) == 0.0,
+                   "outside the edited spans the output is the automatic correction (bit-identical)");
+            const auto editsFile = CaptureSession::getCaptureRoot().getChildFile (session.getCaptureId()).getChildFile ("edits.json");
+            check (editsFile.existsAsFile() && sameNoteEdits (parseNoteEdits (editsFile.loadFileAsString().toStdString()), edits),
+                   "edits saved to captures/<id>/edits.json");
+
+            if (editSnapshotPath.isNotEmpty())
+            {
+                clickNote (view, 0);
+                clickNote (view, 1, ModifierKeys (ModifierKeys::commandModifier));
+                view.zoom (0.5, 1.5);
+                host.play (song, (int64) (2.0 * sampleRate), (int64) (2.0 * sampleRate) + blockSize); // playhead near 2 s
+                runMessageLoop (0.2);
+                const auto image = editor->createComponentSnapshot (editor->getLocalBounds());
+                File (editSnapshotPath).deleteFile();
+                FileOutputStream stream { File (editSnapshotPath) };
+                PNGImageFormat().writeImageToStream (image, stream);
+                std::printf ("  wrote the editor with edits to %s\n", editSnapshotPath.toRawUTF8());
+                // One note picked: the panel with its pitches.
+                clickNote (view, 2);
+                runMessageLoop (0.1);
+                const auto single = File (editSnapshotPath).getSiblingFile (File (editSnapshotPath).getFileNameWithoutExtension() + "-note.png");
+                single.deleteFile();
+                FileOutputStream singleStream { single };
+                PNGImageFormat().writeImageToStream (editor->createComponentSnapshot (editor->getLocalBounds()), singleStream);
+            }
+
+            // Previews: with the transport stopped, a click on a note sounds that note (corrected) once.
+            {
+                Song silence;
+                const auto stoppedBlocks = host.processor->getAuditionPlayer().getBlocksWhileStopped();
+                allocationsCounted = 0;
+                const auto quiet = host.play (silence, 0, (int64) (0.2 * sampleRate), false);
+                check (peak (quiet) == 0.0, "stopped, no preview: silence");
+                clickNote (view, 3);
+                const auto preview = host.play (silence, 0, (int64) (0.5 * sampleRate), false);
+                check (peak (preview) > 0.01, "stopped: clicking a note plays it (preview added to the output)");
+                check (host.processor->getAuditionPlayer().getBlocksWhileStopped() > stoppedBlocks, "processBlock is called while stopped (counted)");
+                // The clicked note's corrected audio from its start.
+                const auto noteStart = (int64) std::floor (view.noteSpan (3).getStart() * sampleRate);
+                bool matches = true;
+                for (size_t i = (size_t) (0.02 * sampleRate); i < (size_t) (0.2 * sampleRate) && matches; ++i)
+                    matches = std::abs (preview[i] - expectedEdited.output[(size_t) noteStart + i]) < 1.0e-5;
+                check (matches, "the preview is the note's corrected audio");
+                clickNote (view, 3);
+                host.play (silence, 0, (int64) (0.1 * sampleRate), false);
+                const auto started = host.play (silence, 0, (int64) (0.3 * sampleRate), true);
+                check (peak (started) == 0.0, "the preview stops when the host starts playing");
+                // Dragging: a tone right away, then the voice at the new pitch.
+                const auto at = view.getNoteBoxCentre (3);
+                view.mouseDown (mouseEventAt (view, at, at, {}, false));
+                view.mouseDrag (mouseEventAt (view, at.translated (0.0f, -view.getSemitoneHeight()), at, ModifierKeys (ModifierKeys::leftButtonModifier), true));
+                const auto tone = host.play (silence, 0, (int64) (0.1 * sampleRate), false);
+                check (peak (tone) > 0.01, "dragging a note sounds its new pitch while stopped");
+                view.mouseUp (mouseEventAt (view, at, at, {}, true)); // back where it started: no edit
+                check (sameNoteEdits (session.getNoteEdits(), edits), "a drag back to the start makes no edit");
+                check (allocationsCounted.load() == 0, "processBlock (capture playback and previews) does not allocate");
+                std::printf ("  allocations in processBlock: %d\n", allocationsCounted.load());
+            }
+            editor.reset();
+            host.processor->getStateInformation (editedState);
+        }
+
+        // A new instance from the plug-in state: the edits and the edited output are back without capturing again.
+        Host host (true);
+        host.processor->setStateInformation (editedState.getData(), (int) editedState.getSize());
+        auto& session = host.processor->getCaptureSession();
+        check (sameNoteEdits (session.getNoteEdits(), edits), "edits restored from the plug-in state");
+        const auto early = host.play (song, 0, length);
+        check (maxDifference (early, expectedEdited.output) < 1.0e-6, "saved edited render played right after loading");
+        host.waitUntilReady();
+        const auto restored = host.play (song, 0, length);
+        check (maxDifference (restored, expectedEdited.output) < 1.0e-6, "same edited output after restoring");
+
+        // Capture again (取り込み直し): the edits stay and find their notes by time.
+        session.arm();
+        host.play (song, 0, length);
+        host.stop();
+        host.waitUntilReady();
+        check (sameNoteEdits (session.getNoteEdits(), edits), "edits kept after capturing again");
+        const auto recaptured = host.play (song, 0, length);
+        check (maxDifference (recaptured, expectedEdited.output) < 1.0e-6, "same edited output after capturing again");
     }
 
     captureRoot.deleteRecursively();
