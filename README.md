@@ -17,7 +17,10 @@ It analyses the whole take first, then moves each note only as far as needed, ke
 - **一音ずつ控えめに補正**: 音の中心の高さだけを動かし、ビブラート・しゃくり・語尾・音のつなぎは残します。声の響き（フォルマント）は保ちます。
 - **正解のメロディーに合わせる**: Synthesizer V のプロジェクト（`.svp`）、MIDI（`.mid`）、ガイドの歌（`.wav`）を読み込むと、フレーズごとに一番合う正解を選んで寄せます（オクターブ違い・掛け合いの拍ずらしにも対応）。届ききらずに中途半端に移っている所は、正解の音符ごとに区切って目標の音程の線へ寄せます。
 - **強さ・しきい値**: 補正の強さ（0〜100%）と、補正しない小さなずれ（セント）を調整できます。
-- **手直し（コマンドライン）**: 音ごとの目標（1 セント単位）・補正しない・分割・結合を JSON で指定できます（`src/correction/NoteEdits.h`）。
+- **手直し（プラグイン画面）**: 音の四角を上下にドラッグすると半音ずつ動きます。音をクリックするとパネルに元の高さ・自動の目標・今の目標が出て、音名＋セント（例 `D5 +3`、±1 セント）、半音上／下、補正しない、自動に戻す、ここで分ける、前／後ろとつなげる が使えます。Cmd（Windows は Ctrl）＋クリックで音を追加・解除、Shift＋クリックで間の音をまとめて選択、空いている所をドラッグで範囲内の音を選択でき、選んだ音のどれかをドラッグすると全部が同じ半音数だけ動きます（パネルの操作も選んだ全部に効きます）。取り消し・やり直しは Cmd/Ctrl+Z・Shift+Cmd/Ctrl+Z。直した所だけ裏で作り直します。
+- **試聴**: 音や範囲をクリックするとその部分（補正後）を 1 回鳴らします。ドラッグ中は行き先の高さで鳴らします。DAW が止まっていても鳴り、DAW の再生が始まると止まります。
+- **表示**: ズーム（Cmd/Ctrl＋ホイール、ピンチ、ボタン）、スクロール（ホイール）、全体表示、DAW の再生位置の線と追従、正解のメロディーの表示切り替え。
+- 手直しは取り込み方式では `captures/<id>/edits.json` とプロジェクト（プラグインの状態）に、ARA ではプロジェクトの ARA データに保存され、取り込み直し・解析し直しても時刻で同じ音に当てて残ります。JSON はコマンドラインの `--edits` と同じ形式です（`src/correction/NoteEdits.h`）。
 
 ### Logic Pro での使い方（取り込み方式）
 
@@ -68,7 +71,10 @@ Windows では Visual Studio 2022（C++）の開発者コマンドプロンプ�
 - **Gentle per-note correction**: only a note's centre is moved; vibrato, scoops, falls and connections stay. Formants are preserved (Signalsmith Stretch).
 - **Reference melodies**: Synthesizer V `.svp`, MIDI `.mid` or a guide `.wav`. Per sung phrase the best-matching candidate is chosen (any octave, also shifted by whole beats for call-and-response). Where a reference exists, the sung line is aligned to its notes and corrected along a target pitch curve, so notes the singer never quite reaches are pulled onto the target while vibrato stays.
 - **Strength / threshold** controls.
-- **Hand edits** (command line): per-note target (1-cent precision), keep, split, merge, as JSON (`src/correction/NoteEdits.h`).
+- **Hand edits in the plug-in window**: drag a note box up / down by semitones; click a note for a panel with its sung pitch, automatic and current target, a pitch entry (`D5 +3`, ±1 cent), semitone up / down, keep (no correction), back to automatic, split here, join with the previous / next note. Cmd (Ctrl on Windows) + click adds / removes a note, Shift + click selects the notes in between, dragging on empty space selects a range; dragging any selected note moves all of them (the panel acts on all of them too). Undo / redo with Cmd/Ctrl+Z and Shift+Cmd/Ctrl+Z. Only the spans around edited notes are rendered again, in the background.
+- **Previews**: clicking a note or a range plays that part (corrected) once; while dragging, the note sounds at its new pitch. Previews are added to the plug-in's output also while the host is stopped, and stop when the host starts playing.
+- **View**: zoom (Cmd/Ctrl + wheel, pinch, buttons), scroll (wheel), show all, the host playhead with follow mode, and the correct melody on / off.
+- Edits are stored in `captures/<id>/edits.json` and the plug-in state (capture mode) or the ARA archive (ARA), and find their notes again by time after a new capture or analysis. The JSON is the command line's `--edits` format (`src/correction/NoteEdits.h`).
 
 ### Using it in Logic Pro (capture mode)
 
@@ -125,7 +131,7 @@ cmake --build build-analysis && (cd build-analysis && ctest --output-on-failure)
 - `shizuku-edit-session`: keeps one take in memory and re-renders only around hand-edited notes (one JSON command per line on stdin), for interactive front ends.
 - `shizuku-render-view`: draws the plug-in's pitch view to a PNG.
 - `shizuku-au-capture-check` (plug-in build): loads the built component through AudioToolbox, feeds a vocal and a side-chain accompaniment, captures, and compares the corrected output with a file (e.g. `shizuku-correct`'s output).
-- Tests: key detection over all 24 keys, correction accuracy and vibrato preservation, reference selection / alignment, hand edits, and an offline host simulation of the capture mode (`capture-session-test`).
+- Tests: key detection over all 24 keys, correction accuracy and vibrato preservation, reference selection / alignment, hand edits, and an offline host simulation of the capture mode with hand edits and previews (`capture-session-test`).
 
 `out.wav` is 32-bit float: pitch shifting changes the phase relation between harmonics, so the peak can rise by 1–2 dB while the level falls slightly; nothing is limited.
 
