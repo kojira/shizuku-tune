@@ -359,11 +359,6 @@ bool ShizukuPluginEditor::keyPressed (const KeyPress& key)
         model->redoNoteEdit();
         return true;
     }
-    if (key == KeyPress::upKey || key == KeyPress::downKey)
-    {
-        noteEditPanel.moveSelectedBySemitones (key == KeyPress::upKey ? 1 : -1);
-        return true;
-    }
     return false;
 }
 
